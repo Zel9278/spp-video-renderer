@@ -1,0 +1,7 @@
+/.vscode
+/.xmake
+/build
+/main-look-keyboard.cpp
+/midiplayer-base
+/CMakeFiles
+/android
