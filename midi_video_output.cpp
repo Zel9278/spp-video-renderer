@@ -4,6 +4,8 @@
 #include <sstream>
 #include <iomanip>
 #include <filesystem>
+#include <chrono>
+#include <ctime>
 #include <imgui.h>
 
 #ifdef _WIN32
@@ -42,8 +44,13 @@ MidiVideoOutput::MidiVideoOutput()
     , ffmpeg_process_(nullptr)
 {
     // パス文字列を初期化
+#ifdef _WIN32
     strcpy_s(midi_file_path_, sizeof(midi_file_path_), "");
     strcpy_s(video_output_path_, sizeof(video_output_path_), "output_video");
+#else
+    strcpy(midi_file_path_, "");
+    strcpy(video_output_path_, "output_video");
+#endif
 }
 
 MidiVideoOutput::~MidiVideoOutput() {
@@ -101,7 +108,12 @@ bool MidiVideoOutput::LoadMidiFile(const std::string& filepath) {
     midi_file_ = std::unique_ptr<MidiFile>(midi_file_raw);
     
     // ファイルパスを保存
+#ifdef _WIN32
     strncpy_s(midi_file_path_, sizeof(midi_file_path_), filepath.c_str(), _TRUNCATE);
+#else
+    strncpy(midi_file_path_, filepath.c_str(), sizeof(midi_file_path_) - 1);
+    midi_file_path_[sizeof(midi_file_path_) - 1] = '\0';  // null終端を保証
+#endif
     
     // タイミング情報付きイベントに変換
     ConvertMidiEventsToTimed();
@@ -300,6 +312,14 @@ bool MidiVideoOutput::StartVideoOutput(const VideoOutputSettings& settings) {
     frame_count_ = 0;
     playback_state_ = MidiPlaybackState::Recording;
     
+    // デバッグ情報を初期化
+    debug_info_.start_time = std::chrono::system_clock::now();
+    debug_info_.recording_start = std::chrono::steady_clock::now();
+    debug_info_.elapsed_seconds = 0.0;
+    debug_info_.estimated_total_duration = total_duration_;
+    debug_info_.current_frame_count = 0;
+    debug_info_.current_fps = 0.0;
+    
     // 再生を最初から開始
     Stop();
     current_time_ = 0.0;
@@ -377,6 +397,11 @@ void MidiVideoOutput::Update(double delta_time) {
     current_frame_++;
     current_time_ = current_frame_ * frame_time_; // 60FPSベースで正確な時間
     
+    // デバッグ情報の更新
+    if (is_recording_ && video_settings_.show_debug_info) {
+        UpdateDebugInfo();
+    }
+    
     if (update_counter <= 3) {
         std::cout << "Update " << update_counter << ": frame=" << current_frame_ 
                   << ", time=" << current_time_ << "s, duration=" << total_duration_ << "s" << std::endl;
@@ -423,17 +448,26 @@ bool MidiVideoOutput::CaptureFrame() {
         return false;
     }
     
+    // Measure frame capture time
+    auto capture_start = std::chrono::high_resolution_clock::now();
+    
     // フレームバッファをキャプチャ
     std::vector<uint8_t> frame_data = CaptureFramebuffer();
+    
+    auto capture_end = std::chrono::high_resolution_clock::now();
+    auto capture_duration = std::chrono::duration_cast<std::chrono::microseconds>(capture_end - capture_start);
+    
     if (frame_data.empty()) {
         std::cerr << "CaptureFrame failed: frame_data is empty" << std::endl;
         return false;
     }
     
-    // デバッグ: フレームデータの情報を出力
+    // デバッグ: フレームデータとパフォーマンス情報を出力
     if (frame_count_ < 5 || frame_count_ % 100 == 0) {
         std::cerr << "Frame " << frame_count_ << ": data size=" << frame_data.size() 
-                  << ", expected=" << (video_settings_.width * video_settings_.height * 4) << std::endl;
+                  << ", expected=" << (video_settings_.width * video_settings_.height * 4) 
+                  << ", capture time=" << capture_duration.count() << "μs"
+                  << ", GPU optimized=" << (video_settings_.use_gpu_optimized_capture ? "yes" : "no") << std::endl;
         
         // 最初の数ピクセルの値をチェック
         if (frame_data.size() >= 16) {
@@ -920,8 +954,12 @@ std::vector<uint8_t> MidiVideoOutput::CaptureFramebuffer() {
     int width = video_settings_.width;
     int height = video_settings_.height;
     
-    // Use OpenGLRenderer's ReadFramebuffer method for proper offscreen capture
-    return renderer_->ReadFramebuffer(width, height);
+    // Use GPU-optimized PBO capture if enabled, otherwise fall back to standard method
+    if (video_settings_.use_gpu_optimized_capture) {
+        return renderer_->ReadFramebufferPBO(width, height);
+    } else {
+        return renderer_->ReadFramebuffer(width, height);
+    }
 }
 
 void MidiVideoOutput::CreateOutputDirectory() {
@@ -1030,6 +1068,10 @@ void MidiVideoOutput::RenderVideoOutputUI() {
         
         ImGui::Checkbox("Rainbow Effects", &video_settings_.show_rainbow_effects);
         ImGui::Checkbox("Key Blips", &video_settings_.show_key_blips);
+        ImGui::Checkbox("GPU Optimized Capture", &video_settings_.use_gpu_optimized_capture);
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Use PBO (Pixel Buffer Objects) for faster GPU-to-CPU data transfer");
+        }
         
         ImGui::Separator();
         
@@ -1085,11 +1127,104 @@ namespace FrameCapture {
     }
 }
 
+// コーデック固有の設定を取得するヘルパー関数
+std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::string& codec) const {
+    std::vector<std::string> settings;
+    
+    if (codec == "libx264") {
+        // H.264 ソフトウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("ultrafast");
+        settings.push_back("-tune");
+        settings.push_back("zerolatency");
+        settings.push_back("-crf");
+        settings.push_back("23");
+        settings.push_back("-threads");
+        settings.push_back("0");
+    } else if (codec == "libx265") {
+        // H.265/HEVC ソフトウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("ultrafast");
+        settings.push_back("-tune");
+        settings.push_back("zerolatency");
+        settings.push_back("-crf");
+        settings.push_back("28"); // H.265は少し高い値でも同等品質
+        settings.push_back("-threads");
+        settings.push_back("0");
+    } else if (codec == "h264_nvenc") {
+        // NVIDIA NVENC H.264 ハードウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("p1"); // 最高速プリセット (NVENC用)
+        settings.push_back("-tune");
+        settings.push_back("ll"); // 低遅延 (NVENC用)
+        settings.push_back("-rc");
+        settings.push_back("cbr"); // CBR レート制御
+        settings.push_back("-gpu");
+        settings.push_back("0"); // GPU 0を使用
+    } else if (codec == "hevc_nvenc") {
+        // NVIDIA NVENC H.265/HEVC ハードウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("p1"); // 最高速プリセット
+        settings.push_back("-tune");
+        settings.push_back("ll"); // 低遅延
+        settings.push_back("-rc");
+        settings.push_back("cbr"); // CBR レート制御
+        settings.push_back("-gpu");
+        settings.push_back("0"); // GPU 0を使用
+    } else if (codec == "h264_qsv") {
+        // Intel Quick Sync Video H.264 ハードウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("veryfast");
+        settings.push_back("-look_ahead");
+        settings.push_back("0"); // 先読み無効
+        settings.push_back("-global_quality");
+        settings.push_back("23");
+    } else if (codec == "hevc_qsv") {
+        // Intel Quick Sync Video H.265/HEVC ハードウェアエンコーダー
+        settings.push_back("-preset");
+        settings.push_back("veryfast");
+        settings.push_back("-look_ahead");
+        settings.push_back("0");
+        settings.push_back("-global_quality");
+        settings.push_back("28");
+    } else if (codec == "libvpx-vp9") {
+        // VP9 ソフトウェアエンコーダー
+        settings.push_back("-deadline");
+        settings.push_back("realtime");
+        settings.push_back("-cpu-used");
+        settings.push_back("8"); // 最高速
+        settings.push_back("-threads");
+        settings.push_back("0");
+    } else if (codec == "h264_amf") {
+        // AMD AMF H.264 ハードウェアエンコーダー
+        settings.push_back("-quality");
+        settings.push_back("speed"); // 速度優先
+        settings.push_back("-rc");
+        settings.push_back("cbr");
+    } else if (codec == "hevc_amf") {
+        // AMD AMF H.265/HEVC ハードウェアエンコーダー
+        settings.push_back("-quality");
+        settings.push_back("speed");
+        settings.push_back("-rc");
+        settings.push_back("cbr");
+    } else {
+        // 未知のコーデック: 基本設定のみ
+        std::cout << "Warning: Unknown codec '" << codec << "', using basic settings" << std::endl;
+        settings.push_back("-threads");
+        settings.push_back("0");
+    }
+    
+    return settings;
+}
+
 // FFmpeg関連のメソッド実装
 bool MidiVideoOutput::InitializeFFmpeg() {
     if (ffmpeg_process_) {
         FinalizeFFmpeg();
     }
+    
+    // コーデックに応じた設定を取得
+    auto codec_settings = GetCodecSpecificSettings(video_settings_.video_codec);
     
     // FFmpegコマンドを構築
     std::stringstream cmd;
@@ -1099,15 +1234,17 @@ bool MidiVideoOutput::InitializeFFmpeg() {
     cmd << " -video_size " << video_settings_.width << "x" << video_settings_.height; // 解像度
     cmd << " -framerate " << video_settings_.fps; // フレームレート
     cmd << " -i pipe:0"; // 標準入力から読み取り
-    cmd << " -c:v libx264"; // ビデオコーデック: H.264
-    cmd << " -preset ultrafast"; // エンコードプリセット: 最高速
-    cmd << " -tune zerolatency"; // 低遅延チューニング
-    cmd << " -crf 23"; // CRF値 (高速化のため品質を少し下げる)
-    cmd << " -b:v " << video_settings_.bitrate; // ビットレート: CBR 8000 kbps
+    cmd << " -c:v " << video_settings_.video_codec; // ビデオコーデック: コマンドライン引数から設定
+    
+    // コーデック固有の設定を追加
+    for (const auto& setting : codec_settings) {
+        cmd << " " << setting;
+    }
+    
+    cmd << " -b:v " << video_settings_.bitrate; // ビットレート
     cmd << " -maxrate " << video_settings_.bitrate; // 最大ビットレート
     cmd << " -bufsize " << (video_settings_.bitrate * 2); // バッファサイズ
     cmd << " -pix_fmt yuv420p"; // 出力ピクセルフォーマット
-    cmd << " -threads 0"; // 全CPUコアを使用
     cmd << " \"" << output_video_path_ << "\""; // 出力ファイル
     
     std::string command = cmd.str();
@@ -1183,4 +1320,136 @@ bool MidiVideoOutput::WriteFrameToFFmpeg(const std::vector<uint8_t>& frame_data)
     }
     
     return true;
+}
+
+// デバッグ情報の更新
+void MidiVideoOutput::UpdateDebugInfo() {
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed_duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - debug_info_.recording_start);
+    
+    debug_info_.elapsed_seconds = elapsed_duration.count() / 1000.0;
+    debug_info_.current_frame_count = frame_count_;
+    
+    // FPS計算（過去1秒間の平均）
+    if (debug_info_.elapsed_seconds > 0.0) {
+        debug_info_.current_fps = frame_count_ / debug_info_.elapsed_seconds;
+    }
+    
+    // 推定残り時間の更新
+    if (current_time_ > 0.0 && debug_info_.elapsed_seconds > 0.0) {
+        double progress_ratio = current_time_ / total_duration_;
+        if (progress_ratio > 0.0) {
+            debug_info_.estimated_total_duration = debug_info_.elapsed_seconds / progress_ratio;
+        }
+    }
+}
+
+// デバッグオーバーレイの描画
+void MidiVideoOutput::RenderDebugOverlay() {
+    if (!video_settings_.show_debug_info || !renderer_) {
+        return;
+    }
+    
+    // 現在時刻の文字列を生成
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto tm = *std::localtime(&time_t);
+    
+    char real_time_str[64];
+    std::strftime(real_time_str, sizeof(real_time_str), "%Y/%m/%d %H:%M:%S", &tm);
+    
+    // 経過時間の計算
+    int elapsed_days = static_cast<int>(debug_info_.elapsed_seconds) / 86400;
+    int elapsed_hours = (static_cast<int>(debug_info_.elapsed_seconds) % 86400) / 3600;
+    int elapsed_minutes = (static_cast<int>(debug_info_.elapsed_seconds) % 3600) / 60;
+    int elapsed_seconds = static_cast<int>(debug_info_.elapsed_seconds) % 60;
+    
+    // ETA（推定残り時間）の計算
+    double remaining_seconds = debug_info_.estimated_total_duration - debug_info_.elapsed_seconds;
+    if (remaining_seconds < 0) remaining_seconds = 0;
+    
+    int eta_days = static_cast<int>(remaining_seconds) / 86400;
+    int eta_hours = (static_cast<int>(remaining_seconds) % 86400) / 3600;
+    int eta_minutes = (static_cast<int>(remaining_seconds) % 3600) / 60;
+    int eta_secs = static_cast<int>(remaining_seconds) % 60;
+    
+    // デバッグ情報の文字列を構築
+    std::ostringstream debug_text;
+    debug_text << "RealTime: " << real_time_str << "\n";
+    
+    if (elapsed_days > 0) {
+        debug_text << "Elapsed: " << elapsed_days << "d/" << elapsed_hours << ":" 
+                   << std::setfill('0') << std::setw(2) << elapsed_minutes << ":" 
+                   << std::setfill('0') << std::setw(2) << elapsed_seconds << "\n";
+    } else {
+        debug_text << "Elapsed: " << elapsed_hours << ":" 
+                   << std::setfill('0') << std::setw(2) << elapsed_minutes << ":" 
+                   << std::setfill('0') << std::setw(2) << elapsed_seconds << "\n";
+    }
+    
+    if (eta_days > 0) {
+        debug_text << "ETA: " << eta_days << "d/" << eta_hours << ":" 
+                   << std::setfill('0') << std::setw(2) << eta_minutes << ":" 
+                   << std::setfill('0') << std::setw(2) << eta_secs << "\n";
+    } else {
+        debug_text << "ETA: " << eta_hours << ":" 
+                   << std::setfill('0') << std::setw(2) << eta_minutes << ":" 
+                   << std::setfill('0') << std::setw(2) << eta_secs << "\n";
+    }
+    
+    debug_text << "FrameCount: " << debug_info_.current_frame_count << "\n";
+    
+    // FPS と Speed の計算（60FPSを基準として速度倍率を算出）
+    double target_fps = 60.0; // 標準フレームレート
+    double speed_multiplier = debug_info_.current_fps / target_fps;
+    
+    debug_text << "FPS/Speed: " << std::fixed << std::setprecision(1) << debug_info_.current_fps 
+               << "/" << std::setprecision(1) << speed_multiplier << "x";
+    
+    // デバッグ情報のレイアウト計算
+    std::istringstream stream(debug_text.str());
+    std::string line;
+    std::vector<std::string> lines;
+    while (std::getline(stream, line)) {
+        lines.push_back(line);
+    }
+    
+    // パネルの寸法計算
+    float padding = 10.0f;
+    float line_height = 24.0f;
+    float panel_width = 380.0f;  // デバッグ情報用のパネル幅
+    float panel_height = lines.size() * line_height + padding * 2;
+    
+    // 左下の位置（少し余白を取る）
+    Vec2 panel_position(15.0f, video_settings_.height - panel_height - 15.0f);
+    
+    // 背景パネルを描画（半透明の黒）
+    Color panel_bg_color(0.0f, 0.0f, 0.0f, 0.7f); // 半透明の黒
+    renderer_->DrawRect(panel_position, Vec2(panel_width, panel_height), panel_bg_color);
+    
+    // フレームを描画（明るいグレー）
+    Color frame_color(0.8f, 0.8f, 0.8f, 1.0f); // 明るいグレー
+    float frame_thickness = 2.0f;
+    
+    // 上辺
+    renderer_->DrawRect(Vec2(panel_position.x, panel_position.y), 
+                       Vec2(panel_width, frame_thickness), frame_color);
+    // 下辺
+    renderer_->DrawRect(Vec2(panel_position.x, panel_position.y + panel_height - frame_thickness), 
+                       Vec2(panel_width, frame_thickness), frame_color);
+    // 左辺
+    renderer_->DrawRect(Vec2(panel_position.x, panel_position.y), 
+                       Vec2(frame_thickness, panel_height), frame_color);
+    // 右辺
+    renderer_->DrawRect(Vec2(panel_position.x + panel_width - frame_thickness, panel_position.y), 
+                       Vec2(frame_thickness, panel_height), frame_color);
+    
+    // テキストを描画（背景パネルの中に）
+    Color debug_color(1.0f, 1.0f, 1.0f, 1.0f); // 白色
+    Vec2 text_position(panel_position.x + padding, panel_position.y + padding);
+    
+    for (size_t i = 0; i < lines.size(); i++) {
+        Vec2 line_position(text_position.x, text_position.y + line_height * i);
+        renderer_->DrawText(lines[i], line_position, debug_color, 2.0f); // フォントサイズを2倍に
+    }
 }

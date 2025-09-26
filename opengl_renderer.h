@@ -153,6 +153,13 @@ public:
     void UnbindOffscreenFramebuffer();
     std::vector<uint8_t> ReadFramebuffer(int width, int height);
     
+    // GPU-optimized frame capture with PBO
+    bool InitializePBO(int width, int height);
+    void CleanupPBO();
+    std::vector<uint8_t> ReadFramebufferPBO(int width, int height);
+    void StartAsyncReadback(int width, int height);
+    std::vector<uint8_t> GetAsyncReadbackResult(int width, int height);
+    
     // Convert screen coordinates to OpenGL coordinates
     Vec2 ScreenToGL(const Vec2& screen_pos) const;
     Vec2 GLToScreen(const Vec2& gl_pos) const;
@@ -167,6 +174,11 @@ private:
     unsigned int color_texture_;
     unsigned int depth_renderbuffer_;
     bool offscreen_initialized_;
+    
+    // PBO for GPU-optimized frame capture
+    unsigned int pbo_[2];  // Double buffering PBOs
+    int current_pbo_index_;
+    bool pbo_initialized_;
 
     // Background image cache
     struct BackgroundImage {

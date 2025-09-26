@@ -22,22 +22,115 @@ std::unique_ptr<MidiVideoOutput> g_midi_video_output;
 // GLFW callback functions
 void error_callback(int error, const char* description);
 
-int main(int argc, char* argv[]) {
-    // Check command line arguments
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <midi_file>" << std::endl;
-        return -1;
+// Command line options struct
+struct CommandLineOptions {
+    std::string midi_file;
+    std::string video_codec = "libx264";  // Default to H.264
+    bool debug_mode = false;  // Debug information overlay
+};
+
+// Parse command line arguments
+CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
+    CommandLineOptions options;
+    
+    if (argc < 2) {
+        std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
+        std::cerr << "   or: " << argv[0] << " <midi_file> [options]" << std::endl;
+        std::cerr << "Options:" << std::endl;
+        std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
+        std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+        std::cerr << std::endl;
+        std::cerr << "Supported codecs:" << std::endl;
+        std::cerr << "  Software encoders:" << std::endl;
+        std::cerr << "    libx264     - H.264 software encoder (default, widely compatible)" << std::endl;
+        std::cerr << "    libx265     - H.265/HEVC software encoder (better compression)" << std::endl;
+        std::cerr << "    libvpx-vp9  - VP9 software encoder (open source)" << std::endl;
+        std::cerr << std::endl;
+        std::cerr << "  Hardware encoders (require compatible hardware):" << std::endl;
+        std::cerr << "    h264_nvenc  - NVIDIA NVENC H.264 (GeForce GTX 600+ / Quadro)" << std::endl;
+        std::cerr << "    hevc_nvenc  - NVIDIA NVENC H.265/HEVC (GeForce GTX 900+ / Quadro)" << std::endl;
+        std::cerr << "    h264_qsv    - Intel Quick Sync Video H.264 (Sandy Bridge+)" << std::endl;
+        std::cerr << "    hevc_qsv    - Intel Quick Sync Video H.265/HEVC (Skylake+)" << std::endl;
+        std::cerr << "    h264_amf    - AMD AMF H.264 (GCN+ / Polaris+)" << std::endl;
+        std::cerr << "    hevc_amf    - AMD AMF H.265/HEVC (GCN+ / Polaris+)" << std::endl;
+        std::cerr << std::endl;
+        std::cerr << "Examples:" << std::endl;
+        std::cerr << "  " << argv[0] << " song.mid" << std::endl;
+        std::cerr << "  " << argv[0] << " --video-codec h264_nvenc song.mid" << std::endl;
+        std::cerr << "  " << argv[0] << " song.mid -vc libx265" << std::endl;
+        std::cerr << "  " << argv[0] << " -d song.mid --video-codec hevc_nvenc" << std::endl;
+        exit(-1);
     }
     
-    const char* midi_file = argv[1];
-    std::cout << "Loading MIDI file: " << midi_file << std::endl;
+    bool midi_file_found = false;
+    
+    // Parse all arguments and classify them
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        // Check if this argument is an option (starts with - or --)
+        if (arg.length() > 0 && arg[0] == '-') {
+            if (arg == "--video-codec" || arg == "-vc") {
+                if (i + 1 < argc) {
+                    options.video_codec = argv[i + 1];
+                    i++; // Skip the value argument
+                } else {
+                    std::cerr << "Error: " << arg << " requires a value" << std::endl;
+                    exit(-1);
+                }
+            } else if (arg == "--debug" || arg == "-d") {
+                options.debug_mode = true;
+            } else if (arg == "--help" || arg == "-h") {
+                // Show help and exit
+                std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
+                std::cerr << "   or: " << argv[0] << " <midi_file> [options]" << std::endl;
+                std::cerr << "Options:" << std::endl;
+                std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
+                std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+                std::cerr << "  --help, -h                  Show this help message" << std::endl;
+                exit(0);
+            } else {
+                std::cerr << "Error: Unknown option: " << arg << std::endl;
+                exit(-1);
+            }
+        } else {
+            // This argument doesn't start with '-', so it should be the MIDI file path
+            if (!midi_file_found) {
+                options.midi_file = arg;
+                midi_file_found = true;
+            } else {
+                std::cerr << "Error: Multiple MIDI files specified. Only one MIDI file is allowed." << std::endl;
+                std::cerr << "First file: " << options.midi_file << std::endl;
+                std::cerr << "Second file: " << arg << std::endl;
+                exit(-1);
+            }
+        }
+    }
+    
+    // Check if MIDI file was provided
+    if (!midi_file_found || options.midi_file.empty()) {
+        std::cerr << "Error: No MIDI file specified." << std::endl;
+        std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
+        exit(-1);
+    }
+    
+    return options;
+}
+
+int main(int argc, char* argv[]) {
+    // Parse command line arguments
+    CommandLineOptions options = ParseCommandLineArguments(argc, argv);
+    
+    std::cout << "Loading MIDI file: " << options.midi_file << std::endl;
+    std::cout << "Video codec: " << options.video_codec << std::endl;
+    std::cout << "Debug mode: " << (options.debug_mode ? "enabled" : "disabled") << std::endl;
 
     // Get the directory of the executable for output path
     std::filesystem::path exe_path(argv[0]);
     std::filesystem::path exe_dir = exe_path.parent_path();
     
     // Extract MIDI filename without extension for output naming
-    std::filesystem::path midi_path(midi_file);
+    std::filesystem::path midi_path(options.midi_file);
     std::string midi_name = midi_path.stem().string();
     
     // Create output path in the same directory as the executable
@@ -116,9 +209,9 @@ int main(int argc, char* argv[]) {
     std::cout << "MIDI video output initialized successfully!" << std::endl;
 
     // Load MIDI file from command line argument
-    std::cout << "Attempting to load MIDI file: " << midi_file << std::endl;
-    if (!g_midi_video_output->LoadMidiFile(midi_file)) {
-        std::cerr << "Failed to load MIDI file: " << midi_file << std::endl;
+    std::cout << "Attempting to load MIDI file: " << options.midi_file << std::endl;
+    if (!g_midi_video_output->LoadMidiFile(options.midi_file)) {
+        std::cerr << "Failed to load MIDI file: " << options.midi_file << std::endl;
         std::cerr << "Please check if the file exists and is a valid MIDI file." << std::endl;
         return -1;
     }
@@ -134,10 +227,14 @@ int main(int argc, char* argv[]) {
     video_settings.fps = 60;
     video_settings.bitrate = 240000000; // 8 Mbps
     video_settings.output_path = output_path.string(); // Use the calculated output path
+    video_settings.video_codec = options.video_codec; // Use command line specified codec
+    video_settings.show_debug_info = options.debug_mode; // Enable debug overlay if requested
     std::cout << "Configuring video settings:" << std::endl;
     std::cout << "  Resolution: " << video_settings.width << "x" << video_settings.height << std::endl;
     std::cout << "  FPS: " << video_settings.fps << std::endl;
     std::cout << "  Bitrate: " << video_settings.bitrate << " bps" << std::endl;
+    std::cout << "  Video codec: " << video_settings.video_codec << std::endl;
+    std::cout << "  Debug overlay: " << (video_settings.show_debug_info ? "enabled" : "disabled") << std::endl;
     std::cout << "  Output path: " << video_settings.output_path << std::endl;
     g_midi_video_output->SetVideoSettings(video_settings);
 
@@ -211,6 +308,9 @@ int main(int argc, char* argv[]) {
         g_renderer->BindOffscreenFramebuffer(); // ビデオ解像度のオフスクリーンFBOにバインド
         g_renderer->Clear(Color(0.1f, 0.1f, 0.1f, 1.0f)); // Dark gray background
         g_piano_keyboard->Render(*g_renderer);
+        
+        // デバッグ情報を描画 (デバッグモードが有効な場合)
+        g_midi_video_output->RenderDebugOverlay();
         
         // Ensure all OpenGL commands are executed before frame capture
         glFlush();

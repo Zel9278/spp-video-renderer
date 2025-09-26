@@ -69,6 +69,12 @@ struct VideoOutputSettings {
     bool show_key_blips = true;
     float blip_intensity = 1.0f;
     
+    // GPU最適化設定
+    bool use_gpu_optimized_capture = true;  // PBO使用でGPU最適化フレームキャプチャ
+    
+    // デバッグ情報設定
+    bool show_debug_info = false;  // 動画内にデバッグ情報を表示
+    
     // オーディオ設定（将来の拡張用）
     bool export_audio = false;
     std::string audio_format = "wav";
@@ -85,6 +91,19 @@ struct TimedMidiEvent {
 struct TempoChange {
     uint32_t tick;          // 変更が発生するティック
     uint32_t tempo;         // マイクロ秒/四分音符
+};
+
+// デバッグ情報構造体
+struct DebugInfo {
+    std::chrono::system_clock::time_point start_time;  // 録画開始時刻
+    std::chrono::steady_clock::time_point recording_start;  // 録画開始タイマー
+    double elapsed_seconds;  // 経過時間（秒）
+    double estimated_total_duration;  // 推定総時間（秒）
+    int current_frame_count;  // 現在のフレーム数
+    double current_fps;  // 現在のFPS
+    
+    DebugInfo() : elapsed_seconds(0.0), estimated_total_duration(0.0), 
+                  current_frame_count(0), current_fps(0.0) {}
 };
 
 // MIDI動画出力クラス
@@ -149,6 +168,7 @@ public:
     // ImGui UI
     void RenderMidiControls();
     void RenderVideoOutputUI();
+    void RenderDebugOverlay();  // デバッグ情報の描画（公開メソッド）
     
     // コールバック設定
     void SetProgressCallback(std::function<void(float)> callback);
@@ -218,6 +238,7 @@ private:
     bool InitializeFFmpeg();
     void FinalizeFFmpeg();
     bool WriteFrameToFFmpeg(const std::vector<uint8_t>& frame_data);
+    std::vector<std::string> GetCodecSpecificSettings(const std::string& codec) const;
     
     // テンポ管理
     uint32_t current_tempo_; // マイクロ秒/四分音符
@@ -226,10 +247,12 @@ private:
     // デバッグ・統計
     int total_note_count_;
     int processed_event_count_;
+    DebugInfo debug_info_;  // デバッグ情報
     
     // ヘルパー関数
     static std::string GetTimestampString();
     static bool CreateDirectoryRecursive(const std::string& path);
+    void UpdateDebugInfo();  // デバッグ情報の更新
 };
 
 // フレームキャプチャのヘルパー関数

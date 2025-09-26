@@ -8,10 +8,12 @@ set_languages("cxx17")
 set_arch("x64")
 if is_plat("windows") then
     set_toolchains("msvc")
+    -- Add packages for OpenGL and window management on Windows
+    add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb")
+elseif is_plat("linux") then
+    -- For NixOS: Only use packages that can't be provided by system
+    add_requires("glad", "stb")
 end
-
--- Add packages for OpenGL and window management
-add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb")
 
 -- Define the target
 target("piano_keyboard_video_renderer")
@@ -19,7 +21,7 @@ target("piano_keyboard_video_renderer")
     set_default(true)
 
     -- Add source files
-    add_files("main.cpp", "opengl_renderer.cpp", "piano_keyboard.cpp", "keyboard_mapping.cpp", "midi_video_output.cpp")
+    add_files("main.cpp", "opengl_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp")
 
     -- Add header files
     add_headerfiles("*.h")
@@ -37,11 +39,92 @@ target("piano_keyboard_video_renderer")
     end
 
     -- Add packages
-    add_packages("glfw", "glad", "imgui", "stb")
+    if is_plat("windows") then
+        add_packages("glfw", "glad", "imgui", "stb")
+    elseif is_plat("linux") then
+        -- Use system GLFW and system OpenGL
+        if os.getenv("NIX_PROFILES") then
+            -- NixOS: Use only essential packages, use system for rest
+            add_packages("glad", "stb")
+        else
+            -- Other Linux: Use xmake packages
+            add_packages("glad", "imgui", "stb")
+        end
+        -- Link system GLFW directly
+        add_links("glfw")
+    end
 
-    -- Math library (for some platforms)
-    if not is_plat("windows") then
-        add_links("m")
+    -- Platform specific libraries and settings
+    if is_plat("linux") then
+        add_links("dl", "pthread", "m", "GL")
+        -- System X11 libraries - these should be available on most Linux systems
+        add_syslinks("X11", "Xcursor", "Xrandr", "Xinerama", "Xi", "Xext")
+        
+        -- NixOS: Add ImGui library if available in system
+        if os.getenv("NIX_PROFILES") then
+            -- Get ImGui library path from environment
+            local ld_library_path = os.getenv("LD_LIBRARY_PATH")
+            if ld_library_path then
+                for single_path in ld_library_path:gmatch("([^:]+)") do
+                    if single_path:find("imgui") and os.exists(single_path) then
+                        add_linkdirs(single_path)
+                    end
+                end
+            end
+            add_links("imgui")
+        end
+        
+        -- NixOS specific paths
+        local nixos_profile = os.getenv("NIX_PROFILES")
+        if nixos_profile then
+            -- Add Nix store paths
+            add_linkdirs("/nix/store/*/lib")
+            add_includedirs("/nix/store/*/include")
+            
+            -- Try to find headers in common Nix paths
+            local nix_include_paths = {
+                os.getenv("C_INCLUDE_PATH"),
+                os.getenv("CPLUS_INCLUDE_PATH"),
+                "/run/current-system/sw/include",
+                os.getenv("HOME") .. "/.nix-profile/include"
+            }
+            
+            for _, path in ipairs(nix_include_paths) do
+                if path then
+                    -- Split multiple paths by colon
+                    for single_path in path:gmatch("([^:]+)") do
+                        if os.exists(single_path) then
+                            add_includedirs(single_path)
+                        end
+                    end
+                end
+            end
+            
+            -- Add library paths
+            local nix_lib_paths = {
+                os.getenv("LD_LIBRARY_PATH"),
+                "/run/current-system/sw/lib",
+                os.getenv("HOME") .. "/.nix-profile/lib"
+            }
+            
+            for _, path in ipairs(nix_lib_paths) do
+                if path then
+                    -- Split multiple paths by colon
+                    for single_path in path:gmatch("([^:]+)") do
+                        if os.exists(single_path) then
+                            add_linkdirs(single_path)
+                        end
+                    end
+                end
+            end
+        end
+        
+        -- NixOS doesn't have standard Linux paths, so we rely only on Nix paths
+        if not nixos_profile then
+            -- Standard Linux paths as fallback for non-NixOS systems
+            add_linkdirs("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib")
+            add_includedirs("/usr/include")
+        end
     end
 
     -- Compiler and linker flags
@@ -112,7 +195,10 @@ target("midi_parser")
         add_cflags("/W3")  -- Warning level 3
         add_defines("_CRT_SECURE_NO_WARNINGS")
     else
-        add_cflags("-std=c99", "-Wall", "-Wextra")
+        add_defines("_GNU_SOURCE")
+        if is_plat("linux") then
+            add_cxflags("-Wall", "-Wextra", {force = true})
+        end
     end
     
     -- Debug configuration
@@ -152,7 +238,10 @@ target("midi_example")
         add_cflags("/W3")  -- Warning level 3
         add_defines("_CRT_SECURE_NO_WARNINGS")
     else
-        add_cflags("-std=c99", "-Wall", "-Wextra")
+        add_defines("_GNU_SOURCE")
+        if is_plat("linux") then
+            add_cxflags("-Wall", "-Wextra", {force = true})
+        end
     end
     
     -- Debug configuration
