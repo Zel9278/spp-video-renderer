@@ -77,8 +77,9 @@ struct VideoOutputSettings {
     bool show_debug_info = false;  // 動画内にデバッグ情報を表示
     
     // オーディオ設定（将来の拡張用）
-    bool export_audio = false;
-    std::string audio_format = "wav";
+    bool include_audio = false;
+    std::string audio_file_path;
+    int audio_bitrate = 192000; // 192 kbps
 };
 
 // MIDIイベントとタイミング情報

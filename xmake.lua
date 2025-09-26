@@ -16,7 +16,7 @@ elseif is_plat("linux") then
 end
 
 -- Define the target
-target("piano_keyboard_video_renderer")
+target("MPP Video Renderer")
     set_kind("binary")
     set_default(true)
 
@@ -259,5 +259,5 @@ target("midi_example")
     end
 
 -- Apply custom rule to main target
-target("piano_keyboard_video_renderer")
+target("MPP Video Renderer")
     add_rules("check_dependencies")

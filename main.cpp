@@ -27,6 +27,7 @@ struct CommandLineOptions {
     std::string midi_file;
     std::string video_codec = "libx264";  // Default to H.264
     bool debug_mode = false;  // Debug information overlay
+    std::string audio_file;
 };
 
 // Parse command line arguments
@@ -39,6 +40,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "Options:" << std::endl;
         std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
         std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+    std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -78,6 +80,14 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                     std::cerr << "Error: " << arg << " requires a value" << std::endl;
                     exit(-1);
                 }
+            } else if (arg == "--audio-file" || arg == "-af") {
+                if (i + 1 < argc) {
+                    options.audio_file = argv[i + 1];
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a file path" << std::endl;
+                    exit(-1);
+                }
             } else if (arg == "--debug" || arg == "-d") {
                 options.debug_mode = true;
             } else if (arg == "--help" || arg == "-h") {
@@ -87,6 +97,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "Options:" << std::endl;
                 std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
                 std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+            std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -229,12 +240,17 @@ int main(int argc, char* argv[]) {
     video_settings.output_path = output_path.string(); // Use the calculated output path
     video_settings.video_codec = options.video_codec; // Use command line specified codec
     video_settings.show_debug_info = options.debug_mode; // Enable debug overlay if requested
+    if (!options.audio_file.empty()) {
+        video_settings.include_audio = true;
+        video_settings.audio_file_path = options.audio_file;
+    }
     std::cout << "Configuring video settings:" << std::endl;
     std::cout << "  Resolution: " << video_settings.width << "x" << video_settings.height << std::endl;
     std::cout << "  FPS: " << video_settings.fps << std::endl;
     std::cout << "  Bitrate: " << video_settings.bitrate << " bps" << std::endl;
     std::cout << "  Video codec: " << video_settings.video_codec << std::endl;
     std::cout << "  Debug overlay: " << (video_settings.show_debug_info ? "enabled" : "disabled") << std::endl;
+    std::cout << "  Audio file: " << (video_settings.include_audio ? video_settings.audio_file_path : "(none)") << std::endl;
     std::cout << "  Output path: " << video_settings.output_path << std::endl;
     g_midi_video_output->SetVideoSettings(video_settings);
 

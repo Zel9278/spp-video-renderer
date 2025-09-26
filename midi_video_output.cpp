@@ -317,6 +317,18 @@ bool MidiVideoOutput::StartVideoOutput(const VideoOutputSettings& settings) {
     }
     
     video_settings_ = settings;
+    if (video_settings_.include_audio && video_settings_.audio_file_path.empty()) {
+        std::cerr << "Audio output requested but no audio file path provided." << std::endl;
+        return false;
+    }
+
+    if (video_settings_.include_audio) {
+        std::filesystem::path audio_path(video_settings_.audio_file_path);
+        if (!std::filesystem::exists(audio_path)) {
+            std::cerr << "Audio file does not exist: " << audio_path << std::endl;
+            return false;
+        }
+    }
     
     // 出力ビデオファイルのパスを設定
     output_video_path_ = settings.output_path + ".mp4";
@@ -350,6 +362,13 @@ bool MidiVideoOutput::StartVideoOutput(const VideoOutputSettings& settings) {
     std::cout << "  Resolution: " << settings.width << "x" << settings.height << std::endl;
     std::cout << "  FPS: " << settings.fps << std::endl;
     std::cout << "  Bitrate: " << settings.bitrate << " bps" << std::endl;
+    if (video_settings_.include_audio) {
+        std::cout << "  Audio file: " << video_settings_.audio_file_path << std::endl;
+        std::cout << "  Audio codec: aac" << std::endl;
+        std::cout << "  Audio bitrate: " << video_settings_.audio_bitrate << " bps" << std::endl;
+    } else {
+        std::cout << "  Audio file: (none)" << std::endl;
+    }
     
     // MIDI情報を表示
     std::cout << "MIDI Information:" << std::endl;
@@ -1228,6 +1247,9 @@ bool MidiVideoOutput::InitializeFFmpeg() {
     cmd << " -video_size " << video_settings_.width << "x" << video_settings_.height; // 解像度
     cmd << " -framerate " << video_settings_.fps; // フレームレート
     cmd << " -i pipe:0"; // 標準入力から読み取り
+    if (video_settings_.include_audio) {
+        cmd << " -i \"" << video_settings_.audio_file_path << "\""; // 外部オーディオ入力
+    }
     cmd << " -c:v " << video_settings_.video_codec; // ビデオコーデック: コマンドライン引数から設定
     
     // コーデック固有の設定を追加
@@ -1238,6 +1260,12 @@ bool MidiVideoOutput::InitializeFFmpeg() {
     cmd << " -b:v " << video_settings_.bitrate; // ビットレート
     cmd << " -maxrate " << video_settings_.bitrate; // 最大ビットレート
     cmd << " -bufsize " << (video_settings_.bitrate * 2); // バッファサイズ
+    if (video_settings_.include_audio) {
+        cmd << " -c:a aac";
+        int kbps = std::max(1, video_settings_.audio_bitrate / 1000);
+        cmd << " -b:a " << kbps << "k";
+        cmd << " -shortest";
+    }
     cmd << " -pix_fmt yuv420p"; // 出力ピクセルフォーマット
     cmd << " \"" << output_video_path_ << "\""; // 出力ファイル
     
