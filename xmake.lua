@@ -12,7 +12,7 @@ if is_plat("windows") then
     add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb")
 elseif is_plat("linux") then
     -- For NixOS: Only use packages that can't be provided by system
-    add_requires("glad", "stb")
+    add_requires("glad", "stb", "imgui[glfw_opengl3]")
 end
 
 -- Define the target
