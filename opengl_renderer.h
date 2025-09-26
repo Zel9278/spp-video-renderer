@@ -159,6 +159,12 @@ public:
     std::vector<uint8_t> ReadFramebufferPBO(int width, int height);
     void StartAsyncReadback(int width, int height);
     std::vector<uint8_t> GetAsyncReadbackResult(int width, int height);
+
+    // Preview rendering
+    void RenderOffscreenTextureToScreen(int screen_width, int screen_height);
+    void RenderPreviewOverlay(int screen_width, int screen_height,
+                              const std::vector<std::string>& info_lines,
+                              float progress_ratio);
     
     // Convert screen coordinates to OpenGL coordinates
     Vec2 ScreenToGL(const Vec2& screen_pos) const;

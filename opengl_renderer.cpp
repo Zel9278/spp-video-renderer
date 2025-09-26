@@ -743,3 +743,158 @@ std::vector<uint8_t> OpenGLRenderer::GetAsyncReadbackResult(int width, int heigh
     
     return result;
 }
+
+void OpenGLRenderer::RenderOffscreenTextureToScreen(int screen_width, int screen_height) {
+    if (!offscreen_initialized_ || color_texture_ == 0 || window_height_ == 0 || screen_height == 0) {
+        return;
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(0, 0, screen_width, screen_height);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, static_cast<double>(screen_width), static_cast<double>(screen_height), 0.0, -1.0, 1.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    // Calculate letterboxed viewport to maintain aspect ratio
+    float texture_aspect = static_cast<float>(window_width_) / static_cast<float>(window_height_);
+    float screen_aspect = static_cast<float>(screen_width) / static_cast<float>(screen_height);
+
+    float target_width = static_cast<float>(screen_width);
+    float target_height = static_cast<float>(screen_height);
+
+    if (screen_aspect > texture_aspect) {
+        target_width = target_height * texture_aspect;
+    } else {
+        target_height = target_width / texture_aspect;
+    }
+
+    float x_offset = (static_cast<float>(screen_width) - target_width) * 0.5f;
+    float y_offset = (static_cast<float>(screen_height) - target_height) * 0.5f;
+
+    GLboolean blend_enabled = glIsEnabled(GL_BLEND);
+    GLboolean depth_enabled = glIsEnabled(GL_DEPTH_TEST);
+
+    glDisable(GL_DEPTH_TEST);
+    glDisable(GL_BLEND);
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, color_texture_);
+
+    glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    glBegin(GL_QUADS);
+    glTexCoord2f(0.0f, 1.0f); glVertex2f(x_offset, y_offset);
+    glTexCoord2f(1.0f, 1.0f); glVertex2f(x_offset + target_width, y_offset);
+    glTexCoord2f(1.0f, 0.0f); glVertex2f(x_offset + target_width, y_offset + target_height);
+    glTexCoord2f(0.0f, 0.0f); glVertex2f(x_offset, y_offset + target_height);
+    glEnd();
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+
+    if (depth_enabled) {
+        glEnable(GL_DEPTH_TEST);
+    }
+    if (blend_enabled) {
+        glEnable(GL_BLEND);
+    }
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}
+
+void OpenGLRenderer::RenderPreviewOverlay(int screen_width, int screen_height,
+                                          const std::vector<std::string>& info_lines,
+                                          float progress_ratio) {
+    if (screen_width <= 0 || screen_height <= 0 || info_lines.empty()) {
+        return;
+    }
+
+    float clamped_progress = std::clamp(progress_ratio, 0.0f, 1.0f);
+
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, static_cast<double>(screen_width), static_cast<double>(screen_height), 0.0, -1.0, 1.0);
+
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+
+    GLboolean depth_enabled = glIsEnabled(GL_DEPTH_TEST);
+    if (depth_enabled) {
+        glDisable(GL_DEPTH_TEST);
+    }
+
+    GLboolean texture_enabled = glIsEnabled(GL_TEXTURE_2D);
+    if (texture_enabled) {
+        glDisable(GL_TEXTURE_2D);
+    }
+
+    GLboolean blend_enabled = glIsEnabled(GL_BLEND);
+    if (!blend_enabled) {
+        glEnable(GL_BLEND);
+    }
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    const float padding = 14.0f;
+    const float line_height = 22.0f;
+    const float bar_height = 12.0f;
+    const float bar_spacing = 10.0f;
+    const float panel_width = 460.0f;
+
+    float text_height = static_cast<float>(info_lines.size()) * line_height;
+    float panel_height = padding + text_height + bar_spacing + bar_height + padding;
+
+    Vec2 panel_pos(18.0f, 18.0f);
+
+    DrawRectWithBorder(panel_pos,
+                       Vec2(panel_width, panel_height),
+                       Color(0.05f, 0.05f, 0.05f, 0.75f),
+                       Color(1.0f, 1.0f, 1.0f, 0.85f),
+                       2.0f);
+
+    Color text_color(1.0f, 1.0f, 1.0f, 0.95f);
+    Vec2 text_pos(panel_pos.x + padding, panel_pos.y + padding);
+
+    for (size_t i = 0; i < info_lines.size(); ++i) {
+        Vec2 line_pos(text_pos.x, text_pos.y + static_cast<float>(i) * line_height);
+        DrawText(info_lines[i], line_pos, text_color, 1.6f);
+    }
+
+    float bar_width = panel_width - padding * 2.0f;
+    Vec2 bar_pos(panel_pos.x + padding,
+                 panel_pos.y + padding + text_height + bar_spacing * 0.5f);
+
+    Color bar_bg(0.15f, 0.15f, 0.15f, 0.9f);
+    Color bar_fill(0.18f, 0.55f, 0.95f, 0.95f);
+    Color bar_border(1.0f, 1.0f, 1.0f, 0.8f);
+
+    DrawRect(bar_pos, Vec2(bar_width, bar_height), bar_bg);
+    DrawRect(Vec2(bar_pos.x, bar_pos.y),
+             Vec2(bar_width * clamped_progress, bar_height), bar_fill);
+
+    DrawRectWithBorder(bar_pos, Vec2(bar_width, bar_height),
+                       Color(0.0f, 0.0f, 0.0f, 0.0f), bar_border, 1.5f);
+
+    if (!blend_enabled) {
+        glDisable(GL_BLEND);
+    }
+    if (texture_enabled) {
+        glEnable(GL_TEXTURE_2D);
+    }
+    if (depth_enabled) {
+        glEnable(GL_DEPTH_TEST);
+    }
+
+    glPopMatrix();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+}

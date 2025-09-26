@@ -4,6 +4,9 @@
 #include <memory>
 #include <cstring>
 #include <filesystem>
+#include <sstream>
+#include <iomanip>
+#include <vector>
 
 #include "opengl_renderer.h"
 #include "piano_keyboard.h"
@@ -12,7 +15,29 @@
 // Video output constants (must match video settings)
 constexpr int VIDEO_WIDTH = 1920;
 constexpr int VIDEO_HEIGHT = 1080;
+constexpr int PREVIEW_WIDTH = 1280;
+constexpr int PREVIEW_HEIGHT = 720;
 constexpr const char* WINDOW_TITLE = "OpenGL Piano Keyboard";
+
+static std::string FormatTime(double seconds) {
+    if (seconds < 0.0) {
+        seconds = 0.0;
+    }
+
+    int total_seconds = static_cast<int>(seconds + 0.5);
+    int hours = total_seconds / 3600;
+    int minutes = (total_seconds % 3600) / 60;
+    int secs = total_seconds % 60;
+
+    std::ostringstream oss;
+    oss << std::setfill('0');
+    if (hours > 0) {
+        oss << hours << ":" << std::setw(2) << minutes << ":" << std::setw(2) << secs;
+    } else {
+        oss << minutes << ":" << std::setw(2) << secs;
+    }
+    return oss.str();
+}
 
 // Global variables
 std::unique_ptr<OpenGLRenderer> g_renderer;
@@ -28,6 +53,7 @@ struct CommandLineOptions {
     std::string video_codec = "libx264";  // Default to H.264
     bool debug_mode = false;  // Debug information overlay
     std::string audio_file;
+    bool show_preview = false;
 };
 
 // Parse command line arguments
@@ -40,7 +66,8 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "Options:" << std::endl;
         std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
         std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
-    std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+        std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+    std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -90,6 +117,8 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 }
             } else if (arg == "--debug" || arg == "-d") {
                 options.debug_mode = true;
+            } else if (arg == "--show-preview" || arg == "-sp") {
+                options.show_preview = true;
             } else if (arg == "--help" || arg == "-h") {
                 // Show help and exit
                 std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
@@ -97,7 +126,8 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "Options:" << std::endl;
                 std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
                 std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
-            std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+                std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+                std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -135,6 +165,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Loading MIDI file: " << options.midi_file << std::endl;
     std::cout << "Video codec: " << options.video_codec << std::endl;
     std::cout << "Debug mode: " << (options.debug_mode ? "enabled" : "disabled") << std::endl;
+    std::cout << "Preview window: " << (options.show_preview ? "enabled (1280x720)" : "disabled") << std::endl;
 
     // Get the directory of the executable for output path
     std::filesystem::path exe_path(argv[0]);
@@ -180,6 +211,8 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    GLFWwindow* preview_window = nullptr;
+
     // Make the window's context current
     glfwMakeContextCurrent(window);
 
@@ -193,6 +226,33 @@ int main(int argc, char* argv[]) {
     
     std::cout << "OpenGL initialized successfully!" << std::endl;
     std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
+
+    if (options.show_preview) {
+        // Create a visible preview window that shares the OpenGL context
+        glfwDefaultWindowHints();
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+        glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+
+        preview_window = glfwCreateWindow(PREVIEW_WIDTH, PREVIEW_HEIGHT, "Rendering Preview", nullptr, window);
+        if (preview_window) {
+            glfwMakeContextCurrent(preview_window);
+            gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+            glfwSwapInterval(1);
+            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            glfwSwapBuffers(preview_window);
+            std::cout << "Preview window created successfully." << std::endl;
+        } else {
+            std::cerr << "Warning: Failed to create preview window." << std::endl;
+        }
+    }
+
+    // Return to the headless window context for rendering
+    glfwMakeContextCurrent(window);
 
     // Disable V-Sync for headless rendering (not needed)
     glfwSwapInterval(0);
@@ -287,6 +347,13 @@ int main(int argc, char* argv[]) {
         // Only poll events minimally for headless operation
         glfwPollEvents();
 
+        if (preview_window && glfwWindowShouldClose(preview_window)) {
+            std::cout << "Preview window closed by user. Continuing headless rendering only." << std::endl;
+            glfwDestroyWindow(preview_window);
+            preview_window = nullptr;
+            glfwMakeContextCurrent(window);
+        }
+
         // Calculate delta time for consistent frame rate
         double currentFrameTime = glfwGetTime();
         double deltaTime = 1.0 / 60.0; // Fixed 60 FPS for consistent video output
@@ -334,12 +401,62 @@ int main(int argc, char* argv[]) {
         
         // フレームバッファのバインドを解除（デフォルトフレームバッファに戻す）
         g_renderer->UnbindOffscreenFramebuffer();
+
+        if (preview_window) {
+            glfwMakeContextCurrent(preview_window);
+            int preview_fb_width = PREVIEW_WIDTH;
+            int preview_fb_height = PREVIEW_HEIGHT;
+            glfwGetFramebufferSize(preview_window, &preview_fb_width, &preview_fb_height);
+            glClearColor(0.05f, 0.05f, 0.05f, 1.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            g_renderer->RenderOffscreenTextureToScreen(preview_fb_width, preview_fb_height);
+
+            std::vector<std::string> overlay_lines;
+            const auto& preview_settings = g_midi_video_output->GetVideoSettings();
+
+            std::ostringstream ffmpeg_stream;
+            ffmpeg_stream << "FFmpeg: " << preview_settings.video_codec
+                          << " | " << preview_settings.width << "x" << preview_settings.height
+                          << "@" << preview_settings.fps << "fps"
+                          << " | " << std::fixed << std::setprecision(1)
+                          << (preview_settings.bitrate / 1000000.0f) << " Mbps";
+            overlay_lines.push_back(ffmpeg_stream.str());
+
+            std::ostringstream audio_stream;
+            if (preview_settings.include_audio && !preview_settings.audio_file_path.empty()) {
+                std::filesystem::path audio_path(preview_settings.audio_file_path);
+                audio_stream << "Audio: AAC " << (preview_settings.audio_bitrate / 1000)
+                             << " kbps (" << audio_path.filename().string() << ")";
+            } else {
+                audio_stream << "Audio: (none)";
+            }
+            overlay_lines.push_back(audio_stream.str());
+
+            double current_time = g_midi_video_output->GetCurrentTime();
+            double total_duration = g_midi_video_output->GetTotalDuration();
+            std::string total_time_str = total_duration > 0.0 ? FormatTime(total_duration) : "--:--";
+
+            std::ostringstream time_stream;
+            time_stream << "Time: " << FormatTime(current_time) << " / " << total_time_str;
+            overlay_lines.push_back(time_stream.str());
+
+            float progress_ratio = g_midi_video_output->GetProgress();
+            g_renderer->RenderPreviewOverlay(preview_fb_width, preview_fb_height, overlay_lines, progress_ratio);
+
+            glfwSwapBuffers(preview_window);
+            glfwMakeContextCurrent(window);
+        }
     }
 
     // Cleanup
     g_midi_video_output.reset();
     g_piano_keyboard.reset();
     g_renderer.reset();
+
+    if (preview_window) {
+        glfwDestroyWindow(preview_window);
+        preview_window = nullptr;
+    }
 
     glfwDestroyWindow(window);
     glfwTerminate();
