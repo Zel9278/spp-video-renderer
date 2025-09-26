@@ -61,7 +61,7 @@ jobs:
         run: xmake repo -u
 
       - name: Configure build
-        run: xmake config --mode=release --arch=x64 --plat=${{ matrix.plat }}
+        run: xmake config --mode=release --arch=x64 --plat=${{ matrix.plat }} -y
 
       - name: Build project
         run: xmake build
