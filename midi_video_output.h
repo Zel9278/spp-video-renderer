@@ -6,6 +6,7 @@
 #include <memory>
 #include <functional>
 #include <fstream>
+#include <queue>
 #include "midi_parser.h"
 #include "piano_keyboard.h"
 #include "opengl_renderer.h"
@@ -93,6 +94,29 @@ struct TempoChange {
     uint32_t tempo;         // マイクロ秒/四分音符
 };
 
+struct StreamingTrackState {
+    MidiTrack track_state{};
+    MidiEvent current_event{};
+    bool has_event{false};
+    uint32_t event_tick{0};
+    double event_time{0.0};
+};
+
+struct PendingEvent {
+    size_t track_index{0};
+    double time_seconds{0.0};
+    uint32_t tick{0};
+};
+
+struct PendingEventCompare {
+    bool operator()(const PendingEvent& lhs, const PendingEvent& rhs) const {
+        if (lhs.time_seconds == rhs.time_seconds) {
+            return lhs.tick > rhs.tick;
+        }
+        return lhs.time_seconds > rhs.time_seconds;
+    }
+};
+
 // デバッグ情報構造体
 struct DebugInfo {
     std::chrono::system_clock::time_point start_time;  // 録画開始時刻
@@ -175,15 +199,19 @@ public:
     void SetFrameCapturedCallback(std::function<void(int)> callback);
 
 private:
+    using PendingEventQueue = std::priority_queue<PendingEvent, std::vector<PendingEvent>, PendingEventCompare>;
+    static constexpr double kTimeEpsilon = 1e-6;
+
     // 内部状態
     MidiPlaybackState playback_state_;
     std::unique_ptr<MidiFile> midi_file_;
-    std::vector<TimedMidiEvent> timed_events_;
+    // ストリーミング再生用のトラック状態と次イベント待機キュー
+    std::vector<StreamingTrackState> streaming_tracks_;
+    PendingEventQueue pending_events_;
     
     // タイミング管理
     double current_time_;
     double total_duration_;
-    size_t current_event_index_;
     std::chrono::steady_clock::time_point playback_start_time_;
     std::chrono::steady_clock::time_point pause_time_;
     double pause_duration_;
@@ -224,11 +252,12 @@ private:
     void ProcessMidiEvents(double current_time);
     void ProcessNoteEvent(const MidiEvent& event, double event_time);
     void UpdateActiveNotes(double current_time);
+    void ResetStreamingState();
+    void ClearStreamingResources();
+    bool LoadNextTrackEvent(size_t track_index);
     double CalculateTotalDuration();
-    void ConvertMidiEventsToTimed();
-    void CalculateAccurateTiming();
+    void BuildTempoMapAndStats();
     double TicksToSeconds(uint32_t ticks, uint32_t division, uint32_t tempo) const;
-    double CalculateEventTimeRealtime(uint32_t tick) const;  // フレームベースのリアルタイム時間計算
     double CalculateElapsedTimeFromTick(uint32_t targetTick) const;  // midiplayer-base式改良計算
     bool SaveFrameToFile(const std::string& filepath);
     std::vector<uint8_t> CaptureFramebuffer();
@@ -247,6 +276,8 @@ private:
     // デバッグ・統計
     int total_note_count_;
     int processed_event_count_;
+    size_t total_event_count_;
+    uint32_t last_event_tick_;
     DebugInfo debug_info_;  // デバッグ情報
     
     // ヘルパー関数

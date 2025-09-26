@@ -1,11 +1,13 @@
 #include "midi_video_output.h"
 #include <iostream>
 #include <algorithm>
+#include <array>
 #include <sstream>
 #include <iomanip>
 #include <filesystem>
 #include <chrono>
 #include <ctime>
+#include <cmath>
 #include <imgui.h>
 
 #ifdef _WIN32
@@ -26,7 +28,6 @@ MidiVideoOutput::MidiVideoOutput()
     , midi_file_(nullptr)
     , current_time_(0.0)
     , total_duration_(0.0)
-    , current_event_index_(0)
     , pause_duration_(0.0)
     , current_frame_(0)
     , frame_time_(1.0 / 60.0)  // 60FPS = 0.016666...秒/フレーム
@@ -41,6 +42,8 @@ MidiVideoOutput::MidiVideoOutput()
     , current_tempo_(500000) // デフォルト120 BPM
     , total_note_count_(0)
     , processed_event_count_(0)
+    , total_event_count_(0)
+    , last_event_tick_(0)
     , ffmpeg_process_(nullptr)
 {
     // パス文字列を初期化
@@ -115,18 +118,21 @@ bool MidiVideoOutput::LoadMidiFile(const std::string& filepath) {
     midi_file_path_[sizeof(midi_file_path_) - 1] = '\0';  // null終端を保証
 #endif
     
-    // タイミング情報付きイベントに変換
-    ConvertMidiEventsToTimed();
+    // テンポマップと統計情報を作成
+    BuildTempoMapAndStats();
     
     // 総再生時間を計算
     total_duration_ = CalculateTotalDuration();
+    
+    // ストリーミング状態を初期化
+    ResetStreamingState();
     
     std::cout << "MIDI file loaded successfully:" << std::endl;
     std::cout << "  Format: " << midi_file_->header.formatType << std::endl;
     std::cout << "  Tracks: " << midi_file_->header.numberOfTracks << std::endl;
     std::cout << "  Division: " << midi_file_->header.timeDivision << std::endl;
     std::cout << "  Duration: " << total_duration_ << " seconds" << std::endl;
-    std::cout << "  Total events: " << timed_events_.size() << std::endl;
+    std::cout << "  Total events: " << total_event_count_ << std::endl;
     std::cout << "  Note events: " << total_note_count_ << std::endl;
     
     return true;
@@ -136,15 +142,16 @@ void MidiVideoOutput::UnloadMidiFile() {
     Stop();
     
     if (midi_file_) {
+        ClearStreamingResources();
         midi_file_.reset();
-        timed_events_.clear();
         tempo_changes_.clear();
         
         current_time_ = 0.0;
         total_duration_ = 0.0;
-        current_event_index_ = 0;
         total_note_count_ = 0;
         processed_event_count_ = 0;
+        total_event_count_ = 0;
+        last_event_tick_ = 0;
         
         // アクティブノートをクリア
         std::fill(active_notes_.begin(), active_notes_.end(), false);
@@ -176,15 +183,10 @@ void MidiVideoOutput::Play() {
         // 新規再生
         playback_start_time_ = std::chrono::steady_clock::now();
         pause_duration_ = 0.0;
-        current_event_index_ = 0;
-        processed_event_count_ = 0;
         current_frame_ = 0;  // フレームカウンターをリセット
         current_time_ = 0.0;  // 時間もリセット
         
-        // すべてのイベントを未処理にリセット
-        for (auto& event : timed_events_) {
-            event.processed = false;
-        }
+        ResetStreamingState();
     }
     
     playback_state_ = MidiPlaybackState::Playing;
@@ -202,7 +204,6 @@ void MidiVideoOutput::Pause() {
 void MidiVideoOutput::Stop() {
     playback_state_ = MidiPlaybackState::Stopped;
     current_time_ = 0.0;
-    current_event_index_ = 0;
     processed_event_count_ = 0;
     
     // すべてのキーをリリース
@@ -215,10 +216,7 @@ void MidiVideoOutput::Stop() {
     // アクティブノートをクリア
     std::fill(active_notes_.begin(), active_notes_.end(), false);
     
-    // すべてのイベントを未処理にリセット
-    for (auto& event : timed_events_) {
-        event.processed = false;
-    }
+    ResetStreamingState();
     
     std::cout << "MIDI playback stopped" << std::endl;
 }
@@ -229,59 +227,81 @@ void MidiVideoOutput::Seek(double time_seconds) {
     }
     
     time_seconds = std::max(0.0, std::min(time_seconds, total_duration_));
-    current_time_ = time_seconds;
-    
-    // 指定時間に対応するイベントインデックスを見つける
-    current_event_index_ = 0;
-    for (size_t i = 0; i < timed_events_.size(); i++) {
-        if (timed_events_[i].time_seconds <= time_seconds) {
-            current_event_index_ = i + 1;
-        } else {
-            break;
-        }
-    }
-    
+    ResetStreamingState();
+
     // すべてのキーをリリース
     if (piano_keyboard_) {
         for (int note = 0; note < 128; note++) {
             piano_keyboard_->SetKeyPressed(note, false);
         }
     }
-    
-    // アクティブノートをクリア
+
     std::fill(active_notes_.begin(), active_notes_.end(), false);
-    
-    // 現在時刻までのノートオンイベントを適用
-    for (size_t i = 0; i < current_event_index_ && i < timed_events_.size(); i++) {
-        const auto& timed_event = timed_events_[i];
-        if (timed_event.event.eventType == MIDI_EVENT_NOTE_ON && timed_event.event.data2 > 0) {
-            // このノートがまだオフになっていないかチェック
-            bool note_still_active = true;
-            for (size_t j = i + 1; j < current_event_index_ && j < timed_events_.size(); j++) {
-                const auto& later_event = timed_events_[j];
-                if ((later_event.event.eventType == MIDI_EVENT_NOTE_OFF ||
-                     (later_event.event.eventType == MIDI_EVENT_NOTE_ON && later_event.event.data2 == 0)) &&
-                    later_event.event.channel == timed_event.event.channel &&
-                    later_event.event.data1 == timed_event.event.data1) {
-                    note_still_active = false;
-                    break;
-                }
+
+    std::array<bool, 128> note_state{};
+    processed_event_count_ = 0;
+
+    while (!pending_events_.empty()) {
+        PendingEvent next = pending_events_.top();
+        if (next.time_seconds > time_seconds + kTimeEpsilon) {
+            break;
+        }
+
+        size_t track_index = next.track_index;
+        pending_events_.pop();
+
+        if (track_index >= streaming_tracks_.size()) {
+            continue;
+        }
+
+        auto& track_state = streaming_tracks_[track_index];
+        if (!track_state.has_event || std::fabs(track_state.event_time - next.time_seconds) > kTimeEpsilon) {
+            continue;
+        }
+
+        const MidiEvent& event = track_state.current_event;
+        if (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) {
+            int note = event.data1;
+            if (note >= 0 && note < 128) {
+                note_state[note] = true;
             }
-            
-            if (note_still_active && piano_keyboard_) {
-                piano_keyboard_->SetKeyPressed(timed_event.event.data1, true);
-                active_notes_[timed_event.event.data1] = true;
+        } else if (event.eventType == MIDI_EVENT_NOTE_OFF ||
+                   (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 == 0)) {
+            int note = event.data1;
+            if (note >= 0 && note < 128) {
+                note_state[note] = false;
+            }
+        }
+
+        midi_free_event(&track_state.current_event);
+        track_state.current_event = MidiEvent{};
+        track_state.has_event = false;
+        processed_event_count_++;
+
+        LoadNextTrackEvent(track_index);
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    if (piano_keyboard_) {
+        for (int note = 0; note < 128; note++) {
+            piano_keyboard_->SetKeyPressed(note, note_state[note]);
+            active_notes_[note] = note_state[note];
+            if (note_state[note]) {
+                note_press_times_[note] = now;
+            }
+        }
+    } else {
+        for (int note = 0; note < 128; note++) {
+            active_notes_[note] = note_state[note];
+            if (note_state[note]) {
+                note_press_times_[note] = now;
             }
         }
     }
-    
-    // イベント処理状態を更新
-    for (size_t i = 0; i < timed_events_.size(); i++) {
-        timed_events_[i].processed = (i < current_event_index_);
-    }
-    
-    processed_event_count_ = static_cast<int>(current_event_index_);
-    
+
+    current_time_ = time_seconds;
+    current_frame_ = static_cast<int>(current_time_ / frame_time_);
+
     std::cout << "Seeked to " << time_seconds << " seconds" << std::endl;
 }
 
@@ -537,13 +557,43 @@ const MidiFile* MidiVideoOutput::GetMidiFile() const {
 
 std::vector<TimedMidiEvent> MidiVideoOutput::GetEventsInRange(double start_time, double end_time) const {
     std::vector<TimedMidiEvent> events;
-    
-    for (const auto& event : timed_events_) {
-        if (event.time_seconds >= start_time && event.time_seconds <= end_time) {
-            events.push_back(event);
+    if (!midi_file_ || end_time < start_time) {
+        return events;
+    }
+
+    for (int track_index = 0; track_index < midi_file_->header.numberOfTracks; ++track_index) {
+        MidiTrack track_copy = midi_file_->tracks[track_index];
+        MidiEvent event{};
+
+        while (midi_read_next_event(&track_copy, &event)) {
+            uint32_t absolute_tick = track_copy.currentTick;
+
+            if ((event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) ||
+                event.eventType == MIDI_EVENT_NOTE_OFF ||
+                (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 == 0)) {
+                double time = CalculateElapsedTimeFromTick(absolute_tick);
+                if (time >= start_time && time <= end_time) {
+                    TimedMidiEvent timed_event{};
+                    timed_event.event = event;
+                    timed_event.tick = absolute_tick;
+                    timed_event.time_seconds = time;
+                    timed_event.processed = false;
+                    events.push_back(timed_event);
+                }
+            }
+
+            midi_free_event(&event);
+            event = MidiEvent{};
         }
     }
-    
+
+    std::sort(events.begin(), events.end(), [](const TimedMidiEvent& a, const TimedMidiEvent& b) {
+        if (a.time_seconds == b.time_seconds) {
+            return a.tick < b.tick;
+        }
+        return a.time_seconds < b.time_seconds;
+    });
+
     return events;
 }
 
@@ -570,40 +620,122 @@ void MidiVideoOutput::ProcessMidiEvents(double current_time) {
         return;
     }
     
-    // デバッグ情報
     static int debug_count = 0;
     if (debug_count < 10) {
-        std::cout << "ProcessMidiEvents: current_time=" << current_time 
-                  << "s, current_event_index=" << current_event_index_ 
-                  << "/" << timed_events_.size() << std::endl;
+        std::cout << "ProcessMidiEvents: current_time=" << current_time
+                  << "s, processed=" << processed_event_count_ << "/" << total_event_count_ << std::endl;
     }
-    
-    // フレームベースでMIDIイベントを処理
-    while (current_event_index_ < timed_events_.size()) {
-        const auto& timed_event = timed_events_[current_event_index_];
-        
-        // 事前計算された時間を使用（リアルタイム計算は不要）
-        double event_time = timed_event.time_seconds;
-        
-        // デバッグ情報
+
+    while (!pending_events_.empty()) {
+        PendingEvent next = pending_events_.top();
+        if (next.time_seconds > current_time + kTimeEpsilon) {
+            break;
+        }
+
+        pending_events_.pop();
+
+        if (next.track_index >= streaming_tracks_.size()) {
+            continue;
+        }
+
+        auto& track_state = streaming_tracks_[next.track_index];
+        if (!track_state.has_event || std::fabs(track_state.event_time - next.time_seconds) > kTimeEpsilon) {
+            continue;
+        }
+
         if (debug_count < 10) {
-            std::cout << "  Event " << current_event_index_ << ": tick=" << timed_event.tick 
-                      << ", precalculated_time=" << event_time << "s" << std::endl;
+            std::cout << "  Event track=" << next.track_index
+                      << ", tick=" << track_state.event_tick
+                      << ", time=" << track_state.event_time << "s" << std::endl;
             debug_count++;
         }
-        
-        if (event_time > current_time) {
-            break; // まだ時間に達していない
-        }
-        
-        if (!timed_event.processed) {
-            ProcessNoteEvent(timed_event.event, event_time);
-            timed_events_[current_event_index_].processed = true;
-            processed_event_count_++;
-        }
-        
-        current_event_index_++;
+
+        ProcessNoteEvent(track_state.current_event, track_state.event_time);
+        midi_free_event(&track_state.current_event);
+        track_state.current_event = MidiEvent{};
+        track_state.has_event = false;
+        processed_event_count_++;
+
+        LoadNextTrackEvent(next.track_index);
     }
+}
+
+void MidiVideoOutput::ResetStreamingState() {
+    ClearStreamingResources();
+
+    if (!midi_file_) {
+        return;
+    }
+
+    streaming_tracks_.resize(midi_file_->header.numberOfTracks);
+    for (size_t i = 0; i < streaming_tracks_.size(); ++i) {
+        auto& state = streaming_tracks_[i];
+        state.track_state = midi_file_->tracks[i];
+        state.current_event = MidiEvent{};
+        state.has_event = false;
+        state.event_tick = 0;
+        state.event_time = 0.0;
+    }
+
+    processed_event_count_ = 0;
+    pending_events_ = PendingEventQueue{};
+
+    for (size_t i = 0; i < streaming_tracks_.size(); ++i) {
+        LoadNextTrackEvent(i);
+    }
+}
+
+void MidiVideoOutput::ClearStreamingResources() {
+    for (auto& state : streaming_tracks_) {
+        if (state.has_event) {
+            midi_free_event(&state.current_event);
+            state.current_event = MidiEvent{};
+            state.has_event = false;
+        }
+    }
+    streaming_tracks_.clear();
+    pending_events_ = PendingEventQueue{};
+}
+
+bool MidiVideoOutput::LoadNextTrackEvent(size_t track_index) {
+    if (!midi_file_ || track_index >= streaming_tracks_.size()) {
+        return false;
+    }
+
+    auto& state = streaming_tracks_[track_index];
+    if (state.has_event) {
+        midi_free_event(&state.current_event);
+        state.current_event = MidiEvent{};
+        state.has_event = false;
+    }
+
+    MidiEvent event{};
+    while (midi_read_next_event(&state.track_state, &event)) {
+        uint32_t absolute_tick = state.track_state.currentTick;
+
+        if (event.eventType == MIDI_EVENT_META && event.metaType == MIDI_META_SET_TEMPO && event.metaLength == 3) {
+            uint32_t tempo = (event.metaData[0] << 16) | (event.metaData[1] << 8) | event.metaData[2];
+            current_tempo_ = tempo;
+        }
+
+        if ((event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) ||
+            event.eventType == MIDI_EVENT_NOTE_OFF ||
+            (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 == 0)) {
+            state.current_event = event;
+            state.has_event = true;
+            state.event_tick = absolute_tick;
+            state.event_time = CalculateElapsedTimeFromTick(absolute_tick);
+
+            pending_events_.push({track_index, state.event_time, state.event_tick});
+            return true;
+        }
+
+        midi_free_event(&event);
+        event = MidiEvent{};
+    }
+
+    state.has_event = false;
+    return false;
 }
 
 void MidiVideoOutput::ProcessNoteEvent(const MidiEvent& event, double event_time) {
@@ -653,136 +785,64 @@ void MidiVideoOutput::UpdateActiveNotes(double current_time) {
 }
 
 double MidiVideoOutput::CalculateTotalDuration() {
-    if (timed_events_.empty()) {
+    if (!midi_file_ || total_event_count_ == 0) {
         return 0.0;
     }
-    
-    // 最後のイベントの時間を取得
-    double last_event_time = 0.0;
-    for (const auto& event : timed_events_) {
-        if (event.time_seconds > last_event_time) {
-            last_event_time = event.time_seconds;
-        }
-    }
-    
-    // 少し余裕を持たせる
-    return last_event_time + 2.0;
+
+    double duration = CalculateElapsedTimeFromTick(last_event_tick_);
+    return duration + 2.0;
 }
 
-void MidiVideoOutput::ConvertMidiEventsToTimed() {
+void MidiVideoOutput::BuildTempoMapAndStats() {
     if (!midi_file_) {
         return;
     }
-    
-    timed_events_.clear();
+
     tempo_changes_.clear();
     total_note_count_ = 0;
-    
-    // デフォルトテンポ
+    total_event_count_ = 0;
+    processed_event_count_ = 0;
+    last_event_tick_ = 0;
+
     current_tempo_ = 500000; // 120 BPM
     tempo_changes_.push_back({0, current_tempo_});
-    
-    // 各トラックのイベントを時系列順に変換
-    for (int track_index = 0; track_index < midi_file_->header.numberOfTracks; track_index++) {
+
+    for (int track_index = 0; track_index < midi_file_->header.numberOfTracks; ++track_index) {
         MidiTrack track_copy = midi_file_->tracks[track_index];
-        MidiEvent event;
-        uint32_t absolute_tick = 0;
-        
+        MidiEvent event{};
+
         while (midi_read_next_event(&track_copy, &event)) {
-            absolute_tick += event.deltaTime;
-            
-            // テンポ変更イベントを記録
+            uint32_t absolute_tick = track_copy.currentTick;
+
             if (event.eventType == MIDI_EVENT_META && event.metaType == MIDI_META_SET_TEMPO && event.metaLength == 3) {
                 uint32_t tempo = (event.metaData[0] << 16) | (event.metaData[1] << 8) | event.metaData[2];
                 tempo_changes_.push_back({absolute_tick, tempo});
             }
-            
-            // ノートイベントのみを記録
-            if (event.eventType == MIDI_EVENT_NOTE_ON || event.eventType == MIDI_EVENT_NOTE_OFF) {
-                TimedMidiEvent timed_event;
-                timed_event.event = event;
-                timed_event.tick = absolute_tick;
-                timed_event.time_seconds = 0.0; // 後で正確に計算
-                timed_event.processed = false;
-                
-                timed_events_.push_back(timed_event);
-                
+
+            if ((event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) ||
+                event.eventType == MIDI_EVENT_NOTE_OFF ||
+                (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 == 0)) {
+                total_event_count_++;
                 if (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) {
                     total_note_count_++;
                 }
-            }
-            
-            // デバッグ: 全イベントの最初の20個を表示
-            static int event_debug_count = 0;
-            if (event_debug_count < 5) { // 5個に減らす
-                std::cout << "All event " << event_debug_count << ": tick=" << absolute_tick 
-                          << ", type=0x" << std::hex << (int)event.eventType << std::dec;
-                if (event.eventType == MIDI_EVENT_NOTE_ON || event.eventType == MIDI_EVENT_NOTE_OFF) {
-                    std::cout << " (NOTE " << (event.eventType == MIDI_EVENT_NOTE_ON ? "ON" : "OFF") 
-                              << ", note=" << (int)event.data1 << ", vel=" << (int)event.data2 << ")";
-                } else if (event.eventType == MIDI_EVENT_META) {
-                    std::cout << " (META, type=0x" << std::hex << (int)event.metaType << std::dec << ")";
+                if (absolute_tick > last_event_tick_) {
+                    last_event_tick_ = absolute_tick;
                 }
-                std::cout << std::endl;
-                event_debug_count++;
             }
-            
+
             midi_free_event(&event);
+            event = MidiEvent{};
         }
     }
-    
-    // テンポ変更を時系列順にソート
+
     std::sort(tempo_changes_.begin(), tempo_changes_.end(),
               [](const TempoChange& a, const TempoChange& b) {
                   return a.tick < b.tick;
               });
-    
-    // 正確な時間計算を実行
-    CalculateAccurateTiming();
-    
-    // ソート前の最初の10個のイベントの時間を表示
-    std::cout << "Before sorting - First 10 events timing:" << std::endl;
-    for (size_t i = 0; i < std::min((size_t)10, timed_events_.size()); ++i) {
-        const auto& event = timed_events_[i];
-        std::cout << "  Event " << i << ": tick=" << event.tick 
-                  << ", time=" << event.time_seconds << "s" << std::endl;
-    }
-    
-    // 時系列順にソート
-    std::sort(timed_events_.begin(), timed_events_.end(), 
-              [](const TimedMidiEvent& a, const TimedMidiEvent& b) {
-                  return a.time_seconds < b.time_seconds;
-              });
-    
-    std::cout << "Converted " << timed_events_.size() << " MIDI events to timed events" << std::endl;
-    
-    // 最小時間のイベントを検索
-    if (!timed_events_.empty()) {
-        auto min_time_event = std::min_element(timed_events_.begin(), timed_events_.end(),
-            [](const TimedMidiEvent& a, const TimedMidiEvent& b) {
-                return a.time_seconds < b.time_seconds;
-            });
-        std::cout << "Minimum time event: tick=" << min_time_event->tick 
-                  << ", time=" << min_time_event->time_seconds << "s" << std::endl;
-    }
-    
-    // ソート後の最初の10個のイベントの時間を表示
-    std::cout << "After sorting - First 10 events timing:" << std::endl;
-    for (size_t i = 0; i < std::min((size_t)10, timed_events_.size()); ++i) {
-        const auto& event = timed_events_[i];
-        std::cout << "  Event " << i << ": tick=" << event.tick 
-                  << ", time=" << event.time_seconds << "s" << std::endl;
-    }
-}
 
-void MidiVideoOutput::CalculateAccurateTiming() {
-    if (timed_events_.empty() || !midi_file_) {
-        return;
-    }
-    
-    // midiplayer-base式の改良アルゴリズムを使用
-    for (auto& event : timed_events_) {
-        event.time_seconds = CalculateElapsedTimeFromTick(event.tick);
+    if (!tempo_changes_.empty()) {
+        current_tempo_ = tempo_changes_.front().tempo;
     }
 }
 
@@ -855,72 +915,6 @@ double MidiVideoOutput::TicksToSeconds(uint32_t ticks, uint32_t division, uint32
         double seconds_per_quarter = tempo / 1000000.0;  // マイクロ秒を秒に変換
         return quarter_notes * seconds_per_quarter;
     }
-}
-
-double MidiVideoOutput::CalculateEventTimeRealtime(uint32_t tick) const {
-    if (!midi_file_) {
-        return 0.0;
-    }
-    
-    double time = 0.0;
-    uint32_t current_tick = 0;
-    uint32_t current_tempo = current_tempo_;  // デフォルトテンポから開始
-    
-    // デバッグ情報（最初の5回のみ）
-    static int debug_count = 0;
-    bool should_debug = debug_count < 5;
-    
-    if (should_debug) {
-        std::cout << "CalculateEventTimeRealtime: target_tick=" << tick 
-                  << ", division=" << midi_file_->header.timeDivision 
-                  << ", tempo_changes_count=" << tempo_changes_.size() << std::endl;
-    }
-    
-    // テンポ変更を適用しながら時間を計算
-    for (const auto& tempo_change : tempo_changes_) {
-        if (tempo_change.tick > tick) {
-            // 目標tickに到達する前にテンポ変更があった
-            break;
-        }
-        
-        if (tempo_change.tick > current_tick) {
-            // 前のテンポで現在ティックまでの時間を加算
-            uint32_t tick_diff = tempo_change.tick - current_tick;
-            double time_diff = TicksToSeconds(tick_diff, midi_file_->header.timeDivision, current_tempo);
-            time += time_diff;
-            current_tick = tempo_change.tick;
-            
-            if (should_debug) {
-                std::cout << "  Applied tempo " << current_tempo << " for " << tick_diff 
-                          << " ticks, time_diff=" << time_diff << "s" << std::endl;
-            }
-        }
-        
-        current_tempo = tempo_change.tempo;
-        if (should_debug) {
-            std::cout << "  Tempo change at tick " << tempo_change.tick 
-                      << " to " << tempo_change.tempo << " μs/quarter" << std::endl;
-        }
-    }
-    
-    // 残りのティック差分を現在のテンポで計算
-    if (tick > current_tick) {
-        uint32_t tick_diff = tick - current_tick;
-        double time_diff = TicksToSeconds(tick_diff, midi_file_->header.timeDivision, current_tempo);
-        time += time_diff;
-        
-        if (should_debug) {
-            std::cout << "  Final calculation: " << tick_diff << " ticks with tempo " 
-                      << current_tempo << ", time_diff=" << time_diff << "s" << std::endl;
-        }
-    }
-    
-    if (should_debug) {
-        std::cout << "  Final result: " << time << "s" << std::endl;
-        debug_count++;
-    }
-    
-    return time;
 }
 
 bool MidiVideoOutput::SaveFrameToFile(const std::string& filepath) {
@@ -1007,7 +1001,7 @@ void MidiVideoOutput::RenderMidiControls() {
         if (IsMidiLoaded()) {
             // 再生情報
             ImGui::Text("Duration: %.1f seconds", total_duration_);
-            ImGui::Text("Events: %zu", timed_events_.size());
+            ImGui::Text("Events: %zu", total_event_count_);
             ImGui::Text("Notes: %d", total_note_count_);
             
             // 再生制御
