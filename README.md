@@ -34,4 +34,5 @@ An ImGui-based launcher is included as an additional target: `MPP Video Renderer
 It lets you pick MIDI/audio files, choose codecs and resolution, toggle debug/preview flags, and start renders without touching the command line. Renderer stdout/stderr is streamed into the launcher log window for easy monitoring.
 
 ## License
-This project is MIT License
+This project is MIT License\
+Base Project([MPP Frontend](https://github.com/multiplayerpiano/mpp-frontend-v1)) is GPL-3.0 license
