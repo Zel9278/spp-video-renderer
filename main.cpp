@@ -7,14 +7,15 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <stdexcept>
 
 #include "opengl_renderer.h"
 #include "piano_keyboard.h"
 #include "midi_video_output.h"
 
-// Video output constants (must match video settings)
-constexpr int VIDEO_WIDTH = 1920;
-constexpr int VIDEO_HEIGHT = 1080;
+// Default video output resolution
+constexpr int DEFAULT_VIDEO_WIDTH = 1920;
+constexpr int DEFAULT_VIDEO_HEIGHT = 1080;
 constexpr int PREVIEW_WIDTH = 1280;
 constexpr int PREVIEW_HEIGHT = 720;
 constexpr const char* WINDOW_TITLE = "OpenGL Piano Keyboard";
@@ -54,6 +55,8 @@ struct CommandLineOptions {
     bool debug_mode = false;  // Debug information overlay
     std::string audio_file;
     bool show_preview = false;
+    int video_width = DEFAULT_VIDEO_WIDTH;
+    int video_height = DEFAULT_VIDEO_HEIGHT;
 };
 
 // Parse command line arguments
@@ -65,8 +68,9 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "   or: " << argv[0] << " <midi_file> [options]" << std::endl;
         std::cerr << "Options:" << std::endl;
         std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
-        std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
-        std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+    std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+    std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+    std::cerr << "  --resolution, -r <WxH>      Set video resolution (default: 1920x1080)" << std::endl;
     std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
@@ -87,6 +91,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "  " << argv[0] << " song.mid" << std::endl;
         std::cerr << "  " << argv[0] << " --video-codec h264_nvenc song.mid" << std::endl;
         std::cerr << "  " << argv[0] << " song.mid -vc libx265" << std::endl;
+    std::cerr << "  " << argv[0] << " song.mid -r 2560x1440" << std::endl;
         std::cerr << "  " << argv[0] << " -d song.mid --video-codec hevc_nvenc" << std::endl;
         exit(-1);
     }
@@ -103,6 +108,38 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 if (i + 1 < argc) {
                     options.video_codec = argv[i + 1];
                     i++; // Skip the value argument
+                } else {
+                    std::cerr << "Error: " << arg << " requires a value" << std::endl;
+                    exit(-1);
+                }
+            } else if (arg == "--resolution" || arg == "-r") {
+                if (i + 1 < argc) {
+                    std::string value = argv[i + 1];
+                    auto x_pos = value.find('x');
+                    if (x_pos == std::string::npos) {
+                        x_pos = value.find('X');
+                    }
+                    if (x_pos == std::string::npos) {
+                        std::cerr << "Error: Resolution must be in <width>x<height> format (e.g., 1920x1080)" << std::endl;
+                        exit(-1);
+                    }
+
+                    std::string width_str = value.substr(0, x_pos);
+                    std::string height_str = value.substr(x_pos + 1);
+
+                    try {
+                        int width = std::stoi(width_str);
+                        int height = std::stoi(height_str);
+                        if (width <= 0 || height <= 0) {
+                            throw std::invalid_argument("Resolution dimensions must be positive");
+                        }
+                        options.video_width = width;
+                        options.video_height = height;
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid resolution '" << value << "': " << e.what() << std::endl;
+                        exit(-1);
+                    }
+                    i++;
                 } else {
                     std::cerr << "Error: " << arg << " requires a value" << std::endl;
                     exit(-1);
@@ -127,6 +164,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
                 std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
                 std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+                std::cerr << "  --resolution, -r <WxH>      Set video resolution (default: 1920x1080)" << std::endl;
                 std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
@@ -166,6 +204,7 @@ int main(int argc, char* argv[]) {
     std::cout << "Video codec: " << options.video_codec << std::endl;
     std::cout << "Debug mode: " << (options.debug_mode ? "enabled" : "disabled") << std::endl;
     std::cout << "Preview window: " << (options.show_preview ? "enabled (1280x720)" : "disabled") << std::endl;
+    std::cout << "Video resolution: " << options.video_width << "x" << options.video_height << std::endl;
 
     // Get the directory of the executable for output path
     std::filesystem::path exe_path(argv[0]);
@@ -204,7 +243,10 @@ int main(int argc, char* argv[]) {
 #endif
 
     // Create a hidden window for headless rendering (size must match video output)
-    GLFWwindow* window = glfwCreateWindow(VIDEO_WIDTH, VIDEO_HEIGHT, "Piano Keyboard Video Renderer (Headless)", nullptr, nullptr);
+    const int video_width = options.video_width;
+    const int video_height = options.video_height;
+
+    GLFWwindow* window = glfwCreateWindow(video_width, video_height, "Piano Keyboard Video Renderer (Headless)", nullptr, nullptr);
     if (!window) {
         std::cerr << "Failed to create GLFW window" << std::endl;
         glfwTerminate();
@@ -260,14 +302,14 @@ int main(int argc, char* argv[]) {
     // Initialize OpenGL renderer
     std::cout << "Initializing OpenGL renderer..." << std::endl;
     g_renderer = std::make_unique<OpenGLRenderer>();
-    g_renderer->Initialize(VIDEO_WIDTH, VIDEO_HEIGHT);
+    g_renderer->Initialize(video_width, video_height);
     std::cout << "OpenGL renderer initialized successfully!" << std::endl;
 
     // Initialize piano keyboard
     std::cout << "Initializing piano keyboard..." << std::endl;
     g_piano_keyboard = std::make_unique<PianoKeyboard>();
     g_piano_keyboard->Initialize();
-    g_piano_keyboard->UpdateLayout(VIDEO_WIDTH, VIDEO_HEIGHT);
+    g_piano_keyboard->UpdateLayout(video_width, video_height);
     std::cout << "Piano keyboard initialized successfully!" << std::endl;
 
     // Initialize MIDI video output
@@ -293,8 +335,8 @@ int main(int argc, char* argv[]) {
 
     // Configure video settings for high quality output
     auto video_settings = g_midi_video_output->GetVideoSettings();
-    video_settings.width = 1920;
-    video_settings.height = 1080;
+    video_settings.width = video_width;
+    video_settings.height = video_height;
     video_settings.fps = 60;
     video_settings.bitrate = 240000000; // 8 Mbps
     video_settings.output_path = output_path.string(); // Use the calculated output path

@@ -93,6 +93,7 @@ private:
     Vec2 keyboard_size_;
     Vec2 white_key_size_;
     Vec2 black_key_size_;
+    float layout_scale_;
 
     // Auto layout settings
     bool auto_layout_enabled_;

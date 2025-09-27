@@ -8,12 +8,16 @@
 constexpr int PIANO_START_NOTE = 0;    // C-1 (lowest MIDI note)
 constexpr int PIANO_END_NOTE = 127;    // G9 (highest MIDI note)
 constexpr int PIANO_KEY_COUNT = PIANO_END_NOTE - PIANO_START_NOTE + 1;  // 128 keys
+constexpr float REFERENCE_VIDEO_WIDTH = 1920.0f;
+constexpr float REFERENCE_WHITE_KEY_HEIGHT = 260.0f;
+constexpr float REFERENCE_BLACK_KEY_HEIGHT = 140.0f;
 
 PianoKeyboard::PianoKeyboard()
     : keyboard_position_(50.0f, 80.0f)
     , keyboard_size_(1200.0f, 200.0f)
     , white_key_size_(20.0f, 260.0f)
     , black_key_size_(16.0f, 160.0f)
+    , layout_scale_(1.0f)
     , auto_layout_enabled_(true)
     , keyboard_margin_(50.0f)
     , current_window_width_(1280)
@@ -347,31 +351,49 @@ int PianoKeyboard::GetKeyAtPosition(const Vec2& pos) const {
 void PianoKeyboard::CalculateAutoLayout(int window_width, int window_height) {
     // Calculate total number of white keys in our 128-key range
     int total_white_keys = GetTotalWhiteKeys();
+    if (total_white_keys <= 0) {
+        return;
+    }
 
-    // Calculate available width for keyboard (minus margins)
+    // Determine target key width based on reference resolution so the keyboard keeps a consistent size
+    float base_available_width = std::max(0.0f, REFERENCE_VIDEO_WIDTH - (keyboard_margin_ * 2.0f));
+    float reference_white_key_width = base_available_width > 0.0f
+        ? base_available_width / static_cast<float>(total_white_keys)
+        : 20.0f;
+    float reference_total_keyboard_width = reference_white_key_width * static_cast<float>(total_white_keys);
+
+    // Determine scale factor to fit within window while preserving reference size when possible
     float available_width = window_width - (keyboard_margin_ * 2.0f);
+    if (available_width <= 0.0f) {
+        available_width = static_cast<float>(window_width);
+    }
 
-    // Calculate white key width based on available space
-    float white_key_width = available_width / total_white_keys;
+    float scale = 1.0f;
+    if (reference_total_keyboard_width > 0.0f) {
+        scale = available_width / reference_total_keyboard_width;
+    }
 
-    // Limit minimum and maximum key sizes for usability
-    white_key_width = std::max(10.0f, std::min(white_key_width, 50.0f));
+    // Clamp scale to maintain reasonable bounds
+    const float MIN_SCALE = 0.3f;
+    const float MAX_SCALE = 4.0f;
+    scale = std::max(MIN_SCALE, std::min(MAX_SCALE, scale));
+    layout_scale_ = scale;
 
-    // Use fixed keyboard height (don't change with window height)
-    float white_key_height = 260.0f;
-    float black_key_height = 140.0f;
+    float white_key_width = reference_white_key_width * scale;
+    float white_key_height = REFERENCE_WHITE_KEY_HEIGHT * scale;
+    float black_key_height = REFERENCE_BLACK_KEY_HEIGHT * scale;
 
     // Update key sizes
     white_key_size_ = Vec2(white_key_width, white_key_height);
     black_key_size_ = Vec2(white_key_width * 0.75f, black_key_height);
 
-    // Calculate total keyboard width
+    // Calculate total keyboard width using the selected key width
     float total_keyboard_width = total_white_keys * white_key_width;
 
     // Center the keyboard horizontally
     float keyboard_x = (window_width - total_keyboard_width) * 0.5f;
 
-    // Position keyboard in the center of the window
+    // Position keyboard in the center vertically
     float keyboard_y = (window_height - white_key_height) * 0.5f;
 
     keyboard_position_ = Vec2(keyboard_x, keyboard_y);
@@ -381,7 +403,9 @@ void PianoKeyboard::CalculateAutoLayout(int window_width, int window_height) {
     std::cout << "PianoKeyboard Layout Debug:" << std::endl;
     std::cout << "  Window: " << window_width << "x" << window_height << std::endl;
     std::cout << "  Total white keys: " << total_white_keys << std::endl;
+    std::cout << "  Reference key width: " << reference_white_key_width << std::endl;
     std::cout << "  Available width: " << available_width << std::endl;
+    std::cout << "  Scale factor: " << scale << std::endl;
     std::cout << "  White key size: " << white_key_width << "x" << white_key_height << std::endl;
     std::cout << "  Keyboard position: (" << keyboard_x << ", " << keyboard_y << ")" << std::endl;
     std::cout << "  Keyboard size: " << total_keyboard_width << "x" << white_key_height << std::endl;
@@ -407,7 +431,8 @@ void PianoKeyboard::AddKeyBlip(int note, const Color& color) {
         if (index >= 0 && index < static_cast<int>(keys_.size())) {
             // Calculate maximum blips based on keyboard height and blip spacing
             float key_height = keys_[index].is_black ? black_key_size_.y : white_key_size_.y;
-            float blip_height = keys_[index].is_black ? black_blip_height_ : white_blip_height_;
+            float base_blip_height = keys_[index].is_black ? black_blip_height_ : white_blip_height_;
+            float blip_height = base_blip_height * layout_scale_;
             float spacing = blip_height * blip_spacing_factor_;
 
             // Calculate how many blips can fit in the key height
@@ -452,8 +477,9 @@ void PianoKeyboard::UpdateBlips() {
 
         // Additional safety: limit total blips per key based on key height
         float key_height = key.is_black ? black_key_size_.y : white_key_size_.y;
-        float blip_height = key.is_black ? black_blip_height_ : white_blip_height_;
-        float spacing = blip_height * blip_spacing_factor_;
+    float base_blip_height = key.is_black ? black_blip_height_ : white_blip_height_;
+    float blip_height = base_blip_height * layout_scale_;
+    float spacing = blip_height * blip_spacing_factor_;
 
         size_t max_blips_for_key = static_cast<size_t>(std::max(1.0f, key_height / spacing));
         const size_t ABSOLUTE_MAX_BLIPS = 50;
@@ -474,12 +500,12 @@ void PianoKeyboard::RenderWhiteKeyBlips(OpenGLRenderer& renderer) {
         if (key.is_black || key.blips.empty()) continue;
 
         // Add 4px margin around blips
-        const float margin = 4.0f;
+    const float margin = 4.0f * layout_scale_;
 
         // Use the key's actual position and size for blips with margin
         float blip_x = key.position.x + margin;
         float blip_width = key.size.x - (margin * 2.0f);  // Reduce width by margin on both sides
-        float blip_height = white_blip_height_;
+    float blip_height = white_blip_height_ * layout_scale_;
 
         // Start blips from the bottom of the key (on top of the key surface) with margin
         float blip_y = key.position.y + key.size.y - blip_height - margin;
@@ -492,7 +518,8 @@ void PianoKeyboard::RenderWhiteKeyBlips(OpenGLRenderer& renderer) {
         for (size_t i = 0; i < key.blips.size(); ++i) {
             const auto& blip = key.blips[i];
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - blip.time);
-            float time_ratio = std::min(1.0f, elapsed.count() / blip_fade_duration_ms_);
+            float fade_duration = blip_fade_duration_ms_ * std::max(0.5f, std::min(2.0f, layout_scale_));
+            float time_ratio = std::min(1.0f, elapsed.count() / fade_duration);
 
             // Calculate alpha based on time - simple linear fade
             float alpha = 1.0f - time_ratio;
@@ -544,12 +571,12 @@ void PianoKeyboard::RenderBlackKeyBlips(OpenGLRenderer& renderer) {
         if (!key.is_black || key.blips.empty()) continue;
 
         // Add 3px margin around blips
-        const float margin = 3.0f;
+    const float margin = 3.0f * layout_scale_;
 
         // Use the key's actual position and size for blips with margin
         float blip_x = key.position.x + margin;
         float blip_width = key.size.x - (margin * 2.0f);  // Reduce width by margin on both sides
-        float blip_height = black_blip_height_;
+    float blip_height = black_blip_height_ * layout_scale_;
 
         // Start blips from the bottom of the key (on top of the key surface) with margin
         float blip_y = key.position.y + key.size.y - blip_height - margin;
@@ -562,7 +589,8 @@ void PianoKeyboard::RenderBlackKeyBlips(OpenGLRenderer& renderer) {
         for (size_t i = 0; i < key.blips.size(); ++i) {
             const auto& blip = key.blips[i];
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - blip.time);
-            float time_ratio = std::min(1.0f, elapsed.count() / blip_fade_duration_ms_);
+            float fade_duration = blip_fade_duration_ms_ * std::max(0.5f, std::min(2.0f, layout_scale_));
+            float time_ratio = std::min(1.0f, elapsed.count() / fade_duration);
 
             // Calculate alpha based on time - simple linear fade
             float alpha = 1.0f - time_ratio;
