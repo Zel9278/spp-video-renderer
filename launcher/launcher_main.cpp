@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -579,6 +580,163 @@ std::optional<std::filesystem::path> show_open_file_dialog(GLFWwindow* window,
 }
 #endif
 
+#ifndef _WIN32
+std::string shell_escape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (char c : value) {
+        if (c == '"' || c == '\\') {
+            escaped.push_back('\\');
+        }
+        escaped.push_back(c);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+bool command_exists(const char* command) {
+    std::string check = "command -v ";
+    check += command;
+    check += " >/dev/null 2>&1";
+    int result = std::system(check.c_str());
+    return result == 0;
+}
+
+std::string join_patterns(const std::vector<std::string>& patterns) {
+    std::ostringstream oss;
+    for (std::size_t i = 0; i < patterns.size(); ++i) {
+        if (i > 0) {
+            oss << ' ';
+        }
+        oss << patterns[i];
+    }
+    return oss.str();
+}
+
+std::optional<std::string> run_command_capture(const std::string& command) {
+    FILE* pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+        return std::nullopt;
+    }
+
+    std::string output;
+    std::array<char, 1024> buffer{};
+    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe)) {
+        output.append(buffer.data());
+    }
+
+    int status = pclose(pipe);
+    if (status != 0) {
+        return std::nullopt;
+    }
+
+    while (!output.empty() && (output.back() == '\n' || output.back() == '\r')) {
+        output.pop_back();
+    }
+
+    if (output.empty()) {
+        return std::nullopt;
+    }
+
+    return output;
+}
+
+std::optional<std::string> run_zenity_like(const char* executable,
+                                           const std::string& title,
+                                           const std::vector<std::pair<std::string, std::vector<std::string>>>& filters) {
+    std::ostringstream command;
+    command << executable << " --file-selection --title=" << shell_escape(title);
+
+    for (const auto& filter : filters) {
+        if (filter.second.empty()) {
+            continue;
+        }
+        std::string pattern = join_patterns(filter.second);
+        std::string label = filter.first;
+        if (label.empty()) {
+            label = pattern;
+        }
+        command << " --file-filter=" << shell_escape(label + " | " + pattern);
+    }
+
+    return run_command_capture(command.str());
+}
+
+std::optional<std::string> run_kdialog(const std::string& title,
+                                       const std::vector<std::pair<std::string, std::vector<std::string>>>& filters) {
+    std::ostringstream command;
+    command << "kdialog --getopenfilename " << shell_escape(".");
+    if (!filters.empty() && !filters.front().second.empty()) {
+        command << ' ' << shell_escape(join_patterns(filters.front().second));
+    }
+    command << " --title " << shell_escape(title);
+
+    return run_command_capture(command.str());
+}
+
+std::optional<std::filesystem::path> show_open_file_dialog_generic(
+    const std::string& title,
+    const std::vector<std::pair<std::string, std::vector<std::string>>>& filters) {
+    const char* zenity_like_commands[] = {"zenity", "qarma"};
+    for (const char* command : zenity_like_commands) {
+        if (command_exists(command)) {
+            if (auto result = run_zenity_like(command, title, filters)) {
+                return std::filesystem::path(*result);
+            }
+        }
+    }
+
+    if (command_exists("kdialog")) {
+        if (auto result = run_kdialog(title, filters)) {
+            return std::filesystem::path(*result);
+        }
+    }
+
+    std::cerr << "No supported file dialog command found (zenity/qarma/kdialog)." << std::endl;
+    return std::nullopt;
+}
+#endif
+
+std::optional<std::filesystem::path> select_renderer_executable(GLFWwindow* window) {
+#ifdef _WIN32
+    static constexpr wchar_t renderer_filter[] = L"Executables (*.exe)\0*.exe\0All Files (*.*)\0*.*\0\0";
+    return show_open_file_dialog(window, renderer_filter);
+#else
+    const std::vector<std::pair<std::string, std::vector<std::string>>> filters = {
+        {"Executables", {"*"}},
+        {"All files", {"*"}}
+    };
+    return show_open_file_dialog_generic("Select renderer executable", filters);
+#endif
+}
+
+std::optional<std::filesystem::path> select_midi_file(GLFWwindow* window) {
+#ifdef _WIN32
+    static constexpr wchar_t midi_filter[] = L"MIDI Files (*.mid;*.midi)\0*.mid;*.midi\0All Files (*.*)\0*.*\0\0";
+    return show_open_file_dialog(window, midi_filter);
+#else
+    const std::vector<std::pair<std::string, std::vector<std::string>>> filters = {
+        {"MIDI files", {"*.mid", "*.midi"}},
+        {"All files", {"*"}}
+    };
+    return show_open_file_dialog_generic("Select MIDI file", filters);
+#endif
+}
+
+std::optional<std::filesystem::path> select_audio_file(GLFWwindow* window) {
+#ifdef _WIN32
+    static constexpr wchar_t audio_filter[] = L"Audio Files (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0All Files (*.*)\0*.*\0\0";
+    return show_open_file_dialog(window, audio_filter);
+#else
+    const std::vector<std::pair<std::string, std::vector<std::string>>> filters = {
+        {"Audio files", {"*.wav", "*.mp3", "*.flac", "*.ogg"}},
+        {"All files", {"*"}}
+    };
+    return show_open_file_dialog_generic("Select audio file", filters);
+#endif
+}
+
 std::filesystem::path default_renderer_path(const std::filesystem::path& exe_dir) {
 #ifdef _WIN32
     std::filesystem::path candidate = exe_dir / "MPP Video Renderer.exe";
@@ -726,41 +884,32 @@ int main(int argc, char* argv[]) {
 
         ImGui::TextUnformatted("MPP Video Renderer executable");
         ImGui::InputText("##renderer_path", renderer_path_buffer.data(), renderer_path_buffer.size());
-#ifdef _WIN32
         ImGui::SameLine();
         if (ImGui::Button("Browse##renderer")) {
-            static constexpr wchar_t renderer_filter[] = L"Executable Files (*.exe)\0*.exe\0All Files (*.*)\0*.*\0\0";
-            if (auto file = show_open_file_dialog(window, renderer_filter)) {
+            if (auto file = select_renderer_executable(window)) {
                 set_path_buffer(renderer_path_buffer, *file);
             }
         }
-#endif
 
         ImGui::Separator();
 
         ImGui::TextUnformatted("MIDI file");
         ImGui::InputText("##midi_path", midi_path_buffer.data(), midi_path_buffer.size());
-#ifdef _WIN32
         ImGui::SameLine();
         if (ImGui::Button("Browse##midi")) {
-            static constexpr wchar_t midi_filter[] = L"MIDI Files (*.mid;*.midi)\0*.mid;*.midi\0All Files (*.*)\0*.*\0\0";
-            if (auto file = show_open_file_dialog(window, midi_filter)) {
+            if (auto file = select_midi_file(window)) {
                 set_path_buffer(midi_path_buffer, *file);
             }
         }
-#endif
 
         ImGui::TextUnformatted("Audio file (optional)");
         ImGui::InputText("##audio_path", audio_path_buffer.data(), audio_path_buffer.size());
-#ifdef _WIN32
         ImGui::SameLine();
         if (ImGui::Button("Browse##audio")) {
-            static constexpr wchar_t audio_filter[] = L"Audio Files (*.wav;*.mp3;*.flac;*.ogg)\0*.wav;*.mp3;*.flac;*.ogg\0All Files (*.*)\0*.*\0\0";
-            if (auto file = show_open_file_dialog(window, audio_filter)) {
+            if (auto file = select_audio_file(window)) {
                 set_path_buffer(audio_path_buffer, *file);
             }
         }
-#endif
 
         ImGui::Separator();
 
