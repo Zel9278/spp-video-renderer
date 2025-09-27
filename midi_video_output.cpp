@@ -1295,9 +1295,13 @@ bool MidiVideoOutput::InitializeFFmpeg() {
     // コーデックに応じた設定を取得
     auto codec_settings = GetCodecSpecificSettings(video_settings_.video_codec, video_settings_.use_cbr);
     
+    // Use custom FFmpeg path if specified, otherwise use default "ffmpeg"
+    std::string ffmpeg_cmd = video_settings_.ffmpeg_executable_path.empty() ? 
+                            "ffmpeg" : video_settings_.ffmpeg_executable_path;
+    
     // FFmpegコマンドを構築
     std::stringstream cmd;
-    cmd << "ffmpeg -y"; // -y: ファイルを上書き
+    cmd << ffmpeg_cmd << " -y"; // -y: ファイルを上書き
     cmd << " -f rawvideo"; // 入力フォーマット: raw video
     cmd << " -pixel_format rgba"; // ピクセルフォーマット: RGBA
     cmd << " -video_size " << video_settings_.width << "x" << video_settings_.height; // 解像度

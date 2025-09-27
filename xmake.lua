@@ -273,8 +273,8 @@ target("MPP Video Renderer Launcher")
     if is_plat("windows") then
         add_defines("UNICODE", "_UNICODE", "NOMINMAX", "WIN32_LEAN_AND_MEAN")
         add_cxflags("/utf-8")
-        add_links("opengl32", "gdi32", "user32", "kernel32", "shell32")
-        add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32")
+        add_links("opengl32", "gdi32", "user32", "kernel32", "shell32", "ole32")
+        add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "ole32", "comdlg32")
     elseif is_plat("linux") then
         add_links("dl", "pthread", "m", "GL")
         add_links("X11", "Xcursor", "Xrandr", "Xinerama", "Xi", "Xext")

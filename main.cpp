@@ -153,6 +153,8 @@ struct CommandLineOptions {
     bool use_cbr = true;
     int video_bitrate = 240000000;
     VideoOutputSettings::ColorMode color_mode = VideoOutputSettings::ColorMode::Channel;
+    std::string ffmpeg_path;  // Custom FFmpeg executable path
+    std::string output_directory;  // Custom output directory
 };
 
 // Parse command line arguments
@@ -171,7 +173,9 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "  --cbr                       Force constant bitrate encoding" << std::endl;
         std::cerr << "  --vbr, --no-cbr             Use variable bitrate encoding" << std::endl;
         std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
-    std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
+        std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
+        std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
+        std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -299,6 +303,22 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                     std::cerr << "Error: " << arg << " requires a value" << std::endl;
                     exit(-1);
                 }
+            } else if (arg == "--ffmpeg-path" || arg == "-fp") {
+                if (i + 1 < argc) {
+                    options.ffmpeg_path = argv[i + 1];
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a path" << std::endl;
+                    exit(-1);
+                }
+            } else if (arg == "--output-directory" || arg == "-o") {
+                if (i + 1 < argc) {
+                    options.output_directory = argv[i + 1];
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a path" << std::endl;
+                    exit(-1);
+                }
             } else if (arg == "--help" || arg == "-h") {
                 // Show help and exit
                 std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
@@ -313,6 +333,8 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "  --vbr, --no-cbr             Use variable bitrate encoding" << std::endl;
                 std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
                 std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
+                std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
+                std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -355,17 +377,25 @@ int main(int argc, char* argv[]) {
     std::cout << "Rate control: " << (options.use_cbr ? "CBR" : "VBR") << std::endl;
     std::cout << "Target bitrate: " << options.video_bitrate << " bps" << std::endl;
     std::cout << "Blip color mode: " << ColorModeToString(options.color_mode) << std::endl;
+    std::cout << "FFmpeg path: " << (options.ffmpeg_path.empty() ? "(system default)" : options.ffmpeg_path) << std::endl;
+    std::cout << "Output directory: " << (options.output_directory.empty() ? "(executable directory)" : options.output_directory) << std::endl;
 
-    // Get the directory of the executable for output path
-    std::filesystem::path exe_path(argv[0]);
-    std::filesystem::path exe_dir = exe_path.parent_path();
+    // Determine output directory
+    std::filesystem::path output_dir;
+    if (!options.output_directory.empty()) {
+        output_dir = options.output_directory;
+    } else {
+        // Default to executable directory
+        std::filesystem::path exe_path(argv[0]);
+        output_dir = exe_path.parent_path();
+    }
     
     // Extract MIDI filename without extension for output naming
     std::filesystem::path midi_path(options.midi_file);
     std::string midi_name = midi_path.stem().string();
     
-    // Create output path in the same directory as the executable
-    std::filesystem::path output_path = exe_dir / (midi_name + "_output");
+    // Create output path
+    std::filesystem::path output_path = output_dir / (midi_name + "_output");
     
     std::cout << "Output will be saved to: " << output_path.string() << ".mp4" << std::endl;
 
@@ -494,6 +524,7 @@ int main(int argc, char* argv[]) {
     video_settings.video_codec = options.video_codec; // Use command line specified codec
     video_settings.show_debug_info = options.debug_mode; // Enable debug overlay if requested
     video_settings.color_mode = options.color_mode;
+    video_settings.ffmpeg_executable_path = options.ffmpeg_path; // Set custom FFmpeg path if specified
     if (!options.audio_file.empty()) {
         video_settings.include_audio = true;
         video_settings.audio_file_path = options.audio_file;

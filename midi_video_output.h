@@ -89,6 +89,9 @@ struct VideoOutputSettings {
     bool include_audio = false;
     std::string audio_file_path;
     int audio_bitrate = 192000; // 192 kbps
+    
+    // FFmpeg executable path (empty = use default "ffmpeg" from PATH)
+    std::string ffmpeg_executable_path;
 };
 
 // MIDIイベントとタイミング情報

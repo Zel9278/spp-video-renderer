@@ -43,6 +43,8 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #include <windows.h>
+#include <shlobj_core.h>
+#include <combaseapi.h>
 #include <commdlg.h>
 #pragma comment(lib, "Comdlg32.lib")
 #endif
@@ -72,6 +74,8 @@ struct RenderOptions {
     bool use_cbr = true;
     int video_bitrate = 240000000;
     ColorMode color_mode = ColorMode::Channel;
+    std::string ffmpeg_path;        // Custom FFmpeg executable path
+    std::string output_directory;   // Custom output directory
 };
 
 constexpr std::size_t kPathBufferSize = 1024;
@@ -538,6 +542,14 @@ std::string build_command_line(const std::filesystem::path& renderer,
         cmd << " --show-preview";
     }
 
+    if (!opts.ffmpeg_path.empty()) {
+        cmd << " --ffmpeg-path " << quote_argument(opts.ffmpeg_path);
+    }
+    
+    if (!opts.output_directory.empty()) {
+        cmd << " --output-directory " << quote_argument(opts.output_directory);
+    }
+
     if (audio_file) {
         cmd << " --audio-file " << quote_argument(audio_file->string());
     }
@@ -570,6 +582,16 @@ std::wstring build_command_line_w(const std::filesystem::path& renderer,
     }
     if (opts.show_preview) {
         cmd << L" --show-preview";
+    }
+
+    if (!opts.ffmpeg_path.empty()) {
+        std::wstring ffmpeg_path_w(opts.ffmpeg_path.begin(), opts.ffmpeg_path.end());
+        cmd << L" --ffmpeg-path " << quote_argument(ffmpeg_path_w);
+    }
+    
+    if (!opts.output_directory.empty()) {
+        std::wstring output_dir_w(opts.output_directory.begin(), opts.output_directory.end());
+        cmd << L" --output-directory " << quote_argument(output_dir_w);
     }
 
     if (audio_file) {
@@ -611,6 +633,29 @@ std::optional<std::filesystem::path> show_open_file_dialog(GLFWwindow* window,
 
     if (GetOpenFileNameW(&ofn) == TRUE) {
         return std::filesystem::path(ofn.lpstrFile);
+    }
+
+    return std::nullopt;
+}
+
+std::optional<std::filesystem::path> show_select_folder_dialog(GLFWwindow* window) {
+    HWND hwnd = glfwGetWin32Window(window);
+
+    wchar_t display_name[MAX_PATH];
+    BROWSEINFOW bi = {};
+    bi.hwndOwner = hwnd;
+    bi.pszDisplayName = display_name;
+    bi.lpszTitle = L"Select output directory";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (pidl != nullptr) {
+        wchar_t path[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, path)) {
+            CoTaskMemFree(pidl);
+            return std::filesystem::path(path);
+        }
+        CoTaskMemFree(pidl);
     }
 
     return std::nullopt;
@@ -774,6 +819,33 @@ std::optional<std::filesystem::path> select_audio_file(GLFWwindow* window) {
 #endif
 }
 
+std::optional<std::filesystem::path> select_executable_file(GLFWwindow* window, const std::string& title, const std::vector<std::string>& extensions) {
+#ifdef _WIN32
+    static constexpr wchar_t exe_filter[] = L"Executable Files (*.exe)\0*.exe\0All Files (*.*)\0*.*\0\0";
+    return show_open_file_dialog(window, exe_filter);
+#else
+    const std::vector<std::pair<std::string, std::vector<std::string>>> filters = {
+        {"Executable files", extensions},
+        {"All files", {"*"}}
+    };
+    return show_open_file_dialog_generic(title, filters);
+#endif
+}
+
+std::optional<std::filesystem::path> select_directory(GLFWwindow* window, const std::string& title) {
+#ifdef _WIN32
+    return show_select_folder_dialog(window);
+#else
+    // For Unix-like systems, use zenity or kdialog directory selection
+    std::string command = "zenity --file-selection --directory --title=" + shell_escape(title);
+    auto result = run_command_capture(command);
+    if (result && !result->empty()) {
+        return std::filesystem::path(*result);
+    }
+    return std::nullopt;
+#endif
+}
+
 std::filesystem::path default_renderer_path(const std::filesystem::path& exe_dir) {
 #ifdef _WIN32
     std::filesystem::path candidate = exe_dir / "MPP Video Renderer.exe";
@@ -869,6 +941,8 @@ int main(int argc, char* argv[]) {
 
     std::array<char, kPathBufferSize> midi_path_buffer{};
     std::array<char, kPathBufferSize> audio_path_buffer{};
+    std::array<char, kPathBufferSize> ffmpeg_path_buffer{};
+    std::array<char, kPathBufferSize> output_dir_buffer{};
 
     RenderOptions options;
 
@@ -919,71 +993,101 @@ int main(int argc, char* argv[]) {
 
         ImGui::Begin("Settings", nullptr, kRootWindowFlags);
 
-        ImGui::TextUnformatted("MPP Video Renderer executable");
-        ImGui::InputText("##renderer_path", renderer_path_buffer.data(), renderer_path_buffer.size());
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##renderer")) {
-            if (auto file = select_renderer_executable(window)) {
-                set_path_buffer(renderer_path_buffer, *file);
-            }
-        }
-
-        ImGui::Separator();
-
-        ImGui::TextUnformatted("MIDI file");
-        ImGui::InputText("##midi_path", midi_path_buffer.data(), midi_path_buffer.size());
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##midi")) {
-            if (auto file = select_midi_file(window)) {
-                set_path_buffer(midi_path_buffer, *file);
-            }
-        }
-
-        ImGui::TextUnformatted("Audio file (optional)");
-        ImGui::InputText("##audio_path", audio_path_buffer.data(), audio_path_buffer.size());
-        ImGui::SameLine();
-        if (ImGui::Button("Browse##audio")) {
-            if (auto file = select_audio_file(window)) {
-                set_path_buffer(audio_path_buffer, *file);
-            }
-        }
-
-        ImGui::Separator();
-
-        if (ImGui::Combo("Video codec", &codec_index, [](void* data, int idx, const char** out_text) {
-                const auto& vec = *static_cast<const std::vector<std::string>*>(data);
-                if (idx < 0 || idx >= static_cast<int>(vec.size())) {
-                    return false;
+        // File Paths Section
+        if (ImGui::CollapsingHeader("File Paths", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextUnformatted("MPP Video Renderer executable");
+            ImGui::InputText("##renderer_path", renderer_path_buffer.data(), renderer_path_buffer.size());
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##renderer")) {
+                if (auto file = select_renderer_executable(window)) {
+                    set_path_buffer(renderer_path_buffer, *file);
                 }
-                *out_text = vec[idx].c_str();
-                return true;
-            },
-            (void*)&codec_items, static_cast<int>(codec_items.size()))) {
-            options.video_codec = codec_items[codec_index];
-        }
-        ImGui::InputInt("Width", &options.video_width);
-        ImGui::InputInt("Height", &options.video_height);
-        float bitrate_mbps = options.video_bitrate / 1000000.0f;
-        if (bitrate_mbps < 1.0f) {
-            bitrate_mbps = 1.0f;
-        }
-        if (ImGui::DragFloat("Video Bitrate (Mbps)", &bitrate_mbps, 1.0f, 1.0f, 1000.0f, "%.1f")) {
-            bitrate_mbps = std::max(1.0f, bitrate_mbps);
-            options.video_bitrate = static_cast<int>(bitrate_mbps * 1000000.0f);
-        }
-        ImGui::Text("Bitrate: %d bps", options.video_bitrate);
-        ImGui::Checkbox("Constant Bitrate (CBR)", &options.use_cbr);
-        ImGui::Checkbox("Debug overlay", &options.debug_overlay);
-        ImGui::Checkbox("Show preview window", &options.show_preview);
-
-        const char* color_mode_items[] = {"Channel", "Track", "Both"};
-        int color_mode_index_ui = static_cast<int>(options.color_mode);
-        if (ImGui::Combo("Blip color mode", &color_mode_index_ui, color_mode_items, IM_ARRAYSIZE(color_mode_items))) {
-            if (color_mode_index_ui < 0 || color_mode_index_ui > 2) {
-                color_mode_index_ui = 0;
             }
-            options.color_mode = static_cast<RenderOptions::ColorMode>(color_mode_index_ui);
+
+            ImGui::TextUnformatted("MIDI file");
+            ImGui::InputText("##midi_path", midi_path_buffer.data(), midi_path_buffer.size());
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##midi")) {
+                if (auto file = select_midi_file(window)) {
+                    set_path_buffer(midi_path_buffer, *file);
+                }
+            }
+
+            ImGui::TextUnformatted("Audio file (optional)");
+            ImGui::InputText("##audio_path", audio_path_buffer.data(), audio_path_buffer.size());
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##audio")) {
+                if (auto file = select_audio_file(window)) {
+                    set_path_buffer(audio_path_buffer, *file);
+                }
+            }
+
+            ImGui::TextUnformatted("FFmpeg executable (optional)");
+            ImGui::InputText("##ffmpeg_path", ffmpeg_path_buffer.data(), ffmpeg_path_buffer.size());
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##ffmpeg")) {
+                if (auto file = select_executable_file(window, "Select FFmpeg executable", {"*.exe"})) {
+                    set_path_buffer(ffmpeg_path_buffer, *file);
+                }
+            }
+
+            ImGui::TextUnformatted("Output directory (optional)");
+            ImGui::InputText("##output_dir", output_dir_buffer.data(), output_dir_buffer.size());
+            ImGui::SameLine();
+            if (ImGui::Button("Browse##output_dir")) {
+                if (auto dir = select_directory(window, "Select output directory")) {
+                    set_path_buffer(output_dir_buffer, *dir);
+                }
+            }
         }
+
+        ImGui::Separator();
+
+        // Video Settings Section
+        if (ImGui::CollapsingHeader("Video Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (ImGui::Combo("Video codec", &codec_index, [](void* data, int idx, const char** out_text) {
+                    const auto& vec = *static_cast<const std::vector<std::string>*>(data);
+                    if (idx < 0 || idx >= static_cast<int>(vec.size())) {
+                        return false;
+                    }
+                    *out_text = vec[idx].c_str();
+                    return true;
+                },
+                (void*)&codec_items, static_cast<int>(codec_items.size()))) {
+                options.video_codec = codec_items[codec_index];
+            }
+            ImGui::InputInt("Width", &options.video_width);
+            ImGui::InputInt("Height", &options.video_height);
+            float bitrate_mbps = options.video_bitrate / 1000000.0f;
+            if (bitrate_mbps < 1.0f) {
+                bitrate_mbps = 1.0f;
+            }
+            if (ImGui::DragFloat("Video Bitrate (Mbps)", &bitrate_mbps, 1.0f, 1.0f, 1000.0f, "%.1f")) {
+                bitrate_mbps = std::max(1.0f, bitrate_mbps);
+                options.video_bitrate = static_cast<int>(bitrate_mbps * 1000000.0f);
+            }
+            ImGui::Text("Bitrate: %d bps", options.video_bitrate);
+            ImGui::Checkbox("Constant Bitrate (CBR)", &options.use_cbr);
+            
+            const char* color_mode_items[] = {"Channel", "Track", "Both"};
+            int color_mode_index_ui = static_cast<int>(options.color_mode);
+            if (ImGui::Combo("Blip color mode", &color_mode_index_ui, color_mode_items, IM_ARRAYSIZE(color_mode_items))) {
+                if (color_mode_index_ui < 0 || color_mode_index_ui > 2) {
+                    color_mode_index_ui = 0;
+                }
+                options.color_mode = static_cast<RenderOptions::ColorMode>(color_mode_index_ui);
+            }
+        }
+
+        ImGui::Separator();
+
+        // Debug & Preview Section
+        if (ImGui::CollapsingHeader("Debug & Preview", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Checkbox("Debug overlay", &options.debug_overlay);
+            ImGui::Checkbox("Show preview window", &options.show_preview);
+        }
+
+        ImGui::Separator();
 
         bool audio_path_non_empty = std::strlen(audio_path_buffer.data()) > 0;
         if (audio_path_non_empty) {
@@ -1034,6 +1138,17 @@ int main(int argc, char* argv[]) {
             } else if (audio_path && !std::filesystem::exists(*audio_path)) {
                 validation_message = "Audio file not found.";
             } else {
+                auto ffmpeg_path = buffer_to_path(ffmpeg_path_buffer);
+                auto output_dir = buffer_to_path(output_dir_buffer);
+                
+                // Set paths in options
+                if (!ffmpeg_path.empty()) {
+                    options.ffmpeg_path = ffmpeg_path.string();
+                }
+                if (!output_dir.empty()) {
+                    options.output_directory = output_dir.string();
+                }
+                
                 std::string command = build_command_line(renderer_path, midi_path, audio_path, options);
 #ifdef _WIN32
                 std::wstring command_w = build_command_line_w(renderer_path, midi_path, audio_path, options);
