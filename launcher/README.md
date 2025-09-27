@@ -4,7 +4,7 @@ This ImGui-based launcher lets you configure every option required by the `MPP V
 
 ## Highlights
 
-- Browse and select the renderer executable, the target MIDI file, and an optional audio track (uses the native Windows file dialog when available).
+- Browse and select the renderer executable, the target MIDI file, and an optional audio track (uses the native Windows dialog, or zenity/qarma/kdialog on Linux when available).
 - Choose from the bundled list of software and hardware video codecs.
 - Configure resolution, toggle the debug overlay, and enable the live preview window.
 - Watch standard output and error streams from the renderer in real time.
@@ -42,5 +42,6 @@ Disable **Auto-scroll** in the log pane if you want to browse earlier output wit
 ## Notes
 
 - On Windows the **Browse** buttons use the native file dialog. On other platforms, enter paths manually for now.
+- On Linux the launcher attempts to use `zenity`, `qarma`, or `kdialog` for file selection; if none are installed, the text boxes remain available for manual entry.
 - The **Start rendering** button is disabled while a render is running and becomes available again after completion or failure.
 - The resulting video still depends on the behaviour of `MPP Video Renderer`; this launcher only orchestrates parameters and process execution.

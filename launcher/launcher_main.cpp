@@ -21,14 +21,15 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <vector>
 #include <vector>
 #ifndef _WIN32
 #include <cerrno>
