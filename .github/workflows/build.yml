@@ -73,3 +73,86 @@ jobs:
           name: ${{ matrix.name }}-binaries
           path: build/${{ matrix.artifact_dir }}/
           if-no-files-found: error
+
+  release:
+    name: Publish Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      github.event.head_commit != null &&
+      startsWith(github.event.head_commit.message, 'release: v')
+    steps:
+      - name: Extract release version
+        id: version
+        shell: bash
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          message="$HEAD_MESSAGE"
+          first_line=$(printf '%s' "$message" | head -n1)
+          version=$(printf '%s' "$first_line" | sed -n 's/^release: \(v[^[:space:]]*\).*$/\1/p')
+          if [ -z "$version" ]; then
+            echo "version=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        if: steps.version.outputs.version != ''
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release notes
+        if: steps.version.outputs.version != ''
+        shell: bash
+        env:
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          mkdir -p release
+          printf '%s\n' "$HEAD_MESSAGE" | tail -n +2 > release/notes.md
+
+      - name: Package release binaries
+        if: steps.version.outputs.version != ''
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p release
+          python - <<'PY'
+          import os
+          import zipfile
+
+          version = os.environ["RELEASE_VERSION"]
+          base_dir = "artifacts"
+          output_dir = "release"
+
+          if not os.path.isdir(base_dir):
+              raise SystemExit("No artifacts directory to package")
+
+          for name in os.listdir(base_dir):
+              source_path = os.path.join(base_dir, name)
+              archive_name = os.path.join(output_dir, f"{name}-{version}.zip")
+              with zipfile.ZipFile(archive_name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                  if os.path.isdir(source_path):
+                      for root, _, files in os.walk(source_path):
+                          for filename in files:
+                              file_path = os.path.join(root, filename)
+                              relative_path = os.path.relpath(file_path, source_path)
+                              archive.write(file_path, os.path.join(name, relative_path))
+                  else:
+                      archive.write(source_path, os.path.basename(source_path))
+          PY
+
+      - name: Publish GitHub release
+        if: steps.version.outputs.version != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          files: release/*.zip
+          body_path: release/notes.md
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
