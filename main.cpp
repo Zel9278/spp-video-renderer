@@ -582,7 +582,8 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-        // Render to offscreen framebuffer for video output
+    // Render to offscreen framebuffer for video output
+    g_renderer->ResetDrawCallCount();
         g_renderer->BindOffscreenFramebuffer(); // ビデオ解像度のオフスクリーンFBOにバインド
         g_renderer->Clear(Color(0.1f, 0.1f, 0.1f, 1.0f)); // Dark gray background
         g_piano_keyboard->Render(*g_renderer);

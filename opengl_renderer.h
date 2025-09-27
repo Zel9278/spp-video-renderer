@@ -170,10 +170,16 @@ public:
     Vec2 ScreenToGL(const Vec2& screen_pos) const;
     Vec2 GLToScreen(const Vec2& gl_pos) const;
     
+    // Draw call statistics
+    void ResetDrawCallCount();
+    unsigned int GetDrawCallCount() const;
+
 private:
     int window_width_;
     int window_height_;
     std::vector<Rect> batch_rects_;
+
+    unsigned int draw_call_count_;
 
     // Offscreen rendering
     unsigned int framebuffer_;
@@ -204,4 +210,6 @@ private:
     void DrawImageBackground(const BackgroundImage& image, float opacity, int scale_mode);
     void LoadFontTexture();
     void RenderText(const std::string& text, float x, float y, float size, const Color& color);
+
+    void IncrementDrawCallCount();
 };

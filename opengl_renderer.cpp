@@ -6,8 +6,9 @@
 #include <cstring>
 
 OpenGLRenderer::OpenGLRenderer() 
-    : window_width_(800), window_height_(600), 
-      framebuffer_(0), color_texture_(0), depth_renderbuffer_(0), offscreen_initialized_(false),
+        : window_width_(800), window_height_(600), 
+            draw_call_count_(0),
+            framebuffer_(0), color_texture_(0), depth_renderbuffer_(0), offscreen_initialized_(false),
       current_pbo_index_(0), pbo_initialized_(false) {
     pbo_[0] = 0;
     pbo_[1] = 0;
@@ -46,6 +47,18 @@ void OpenGLRenderer::SetViewport(int width, int height) {
     SetupProjection();
 }
 
+void OpenGLRenderer::ResetDrawCallCount() {
+    draw_call_count_ = 0;
+}
+
+unsigned int OpenGLRenderer::GetDrawCallCount() const {
+    return draw_call_count_;
+}
+
+void OpenGLRenderer::IncrementDrawCallCount() {
+    ++draw_call_count_;
+}
+
 void OpenGLRenderer::Clear(const Color& clear_color) {
     glClearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
     glClear(GL_COLOR_BUFFER_BIT);
@@ -63,6 +76,7 @@ void OpenGLRenderer::ClearWithRadialGradient(const Color& center_color, const Co
     const float radius_x = window_width_ * 0.7f;  // Horizontal radius
     const float radius_y = window_height_ * 0.7f; // Vertical radius
 
+    IncrementDrawCallCount();
     glBegin(GL_TRIANGLE_FAN);
     
     // Center vertex
@@ -84,6 +98,7 @@ void OpenGLRenderer::ClearWithRadialGradient(const Color& center_color, const Co
 void OpenGLRenderer::DrawRect(const Vec2& position, const Vec2& size, const Color& color) {
     glColor4f(color.r, color.g, color.b, color.a);
     
+    IncrementDrawCallCount();
     glBegin(GL_QUADS);
     glVertex2f(position.x, position.y);
     glVertex2f(position.x + size.x, position.y);
@@ -94,6 +109,7 @@ void OpenGLRenderer::DrawRect(const Vec2& position, const Vec2& size, const Colo
 
 void OpenGLRenderer::DrawRectGradient(const Vec2& position, const Vec2& size,
                                      const Color& top_color, const Color& bottom_color) {
+    IncrementDrawCallCount();
     glBegin(GL_QUADS);
     // Top-left
     glColor4f(top_color.r, top_color.g, top_color.b, top_color.a);
@@ -128,6 +144,7 @@ void OpenGLRenderer::DrawRectGradientRounded(const Vec2& position, const Vec2& s
     float max_radius = std::min(size.x, size.y) * 0.5f;
     corner_radius = std::min(corner_radius, max_radius);
 
+    IncrementDrawCallCount();
     glBegin(GL_TRIANGLE_FAN);
 
     // Center point for the fan
@@ -251,6 +268,7 @@ void OpenGLRenderer::DrawRectWithBorder(const Vec2& position, const Vec2& size,
     glEnable(GL_LINE_SMOOTH);
     glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
 
+    IncrementDrawCallCount();
     glBegin(GL_LINE_LOOP);
     glVertex2f(position.x, position.y);
     glVertex2f(position.x + size.x, position.y);
@@ -280,6 +298,7 @@ void OpenGLRenderer::DrawRectWithRoundedBorder(const Vec2& position, const Vec2&
     const int segments = 8; // Number of segments for quarter circle
     const float pi = 3.14159265359f;
 
+    IncrementDrawCallCount();
     glBegin(GL_LINE_STRIP);
 
     // Top-left corner
@@ -522,6 +541,7 @@ void OpenGLRenderer::RenderText(const std::string& text, float x, float y, float
 
 // Frame operations for video recording
 void OpenGLRenderer::BeginFrame() {
+    ResetDrawCallCount();
     BindOffscreenFramebuffer();
 }
 
@@ -786,6 +806,7 @@ void OpenGLRenderer::RenderOffscreenTextureToScreen(int screen_width, int screen
     glBindTexture(GL_TEXTURE_2D, color_texture_);
 
     glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+    IncrementDrawCallCount();
     glBegin(GL_QUADS);
     glTexCoord2f(0.0f, 1.0f); glVertex2f(x_offset, y_offset);
     glTexCoord2f(1.0f, 1.0f); glVertex2f(x_offset + target_width, y_offset);

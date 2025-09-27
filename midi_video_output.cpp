@@ -1483,6 +1483,7 @@ void MidiVideoOutput::RenderDebugOverlay() {
     }
     
     debug_text << "FrameCount: " << debug_info_.current_frame_count << "\n";
+    debug_text << "DrawCalls: " << renderer_->GetDrawCallCount() << "\n";
     
     // FPS と Speed の計算（60FPSを基準として速度倍率を算出）
     double target_fps = 60.0; // 標準フレームレート
