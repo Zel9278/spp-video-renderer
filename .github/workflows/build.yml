@@ -66,7 +66,7 @@ jobs:
       - name: Configure build
         run: xmake config --mode=release --arch=x64 --plat=${{ matrix.plat }} -y
 
-      - name: Build project
+      - name: Build all targets
         run: xmake build
 
       - name: Upload binaries
@@ -134,8 +134,30 @@ jobs:
           if not os.path.isdir(base_dir):
               raise SystemExit("No artifacts directory to package")
 
+          REQUIRED_TARGETS = [
+              "MPP Video Renderer",
+              "MPP Video Renderer Launcher",
+          ]
+
+          def find_executable(root, expected_base):
+              for dirpath, _, filenames in os.walk(root):
+                  for filename in filenames:
+                      base, _ = os.path.splitext(filename)
+                      if base == expected_base:
+                          return os.path.join(dirpath, filename)
+              return None
+
           for name in os.listdir(base_dir):
               source_path = os.path.join(base_dir, name)
+              missing = [
+                  target for target in REQUIRED_TARGETS
+                  if not find_executable(source_path, target)
+              ]
+              if missing:
+                  raise SystemExit(
+                      f"Required binaries not found in artifact '{name}': {', '.join(missing)}"
+                  )
+
               archive_name = os.path.join(output_dir, f"{name}-{version}.zip")
               with zipfile.ZipFile(archive_name, "w", compression=zipfile.ZIP_DEFLATED) as archive:
                   if os.path.isdir(source_path):

@@ -265,7 +265,7 @@ target("MPP Video Renderer")
 -- ImGui-based launcher
 target("MPP Video Renderer Launcher")
     set_kind("binary")
-    set_default(false)
+    set_default(true)
 
     add_files("launcher/launcher_main.cpp")
     add_includedirs("launcher")
