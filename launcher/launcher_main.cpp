@@ -57,12 +57,21 @@ enum class JobStatus {
 };
 
 struct RenderOptions {
+    enum class ColorMode {
+        Channel = 0,
+        Track = 1,
+        Both = 2
+    };
+
     int video_width = 1920;
     int video_height = 1080;
     bool show_preview = false;
     bool debug_overlay = false;
     bool include_audio = false;
     std::string video_codec = "libx264";
+    bool use_cbr = true;
+    int video_bitrate = 240000000;
+    ColorMode color_mode = ColorMode::Channel;
 };
 
 constexpr std::size_t kPathBufferSize = 1024;
@@ -489,6 +498,25 @@ std::wstring quote_argument(const std::wstring& value) {
 }
 #endif
 
+const char* color_mode_to_string(RenderOptions::ColorMode mode) {
+    switch (mode) {
+        case RenderOptions::ColorMode::Channel:
+            return "channel";
+        case RenderOptions::ColorMode::Track:
+            return "track";
+        case RenderOptions::ColorMode::Both:
+            return "both";
+    }
+    return "channel";
+}
+
+#ifdef _WIN32
+std::wstring color_mode_to_wstring(RenderOptions::ColorMode mode) {
+    const char* value = color_mode_to_string(mode);
+    return std::wstring(value, value + std::strlen(value));
+}
+#endif
+
 std::string build_command_line(const std::filesystem::path& renderer,
                                const std::filesystem::path& midi_file,
                                const std::optional<std::filesystem::path>& audio_file,
@@ -499,6 +527,9 @@ std::string build_command_line(const std::filesystem::path& renderer,
     cmd << " --video-codec " << quote_argument(opts.video_codec);
 
     cmd << " --resolution " << quote_argument(std::to_string(opts.video_width) + "x" + std::to_string(opts.video_height));
+    cmd << " --bitrate " << quote_argument(std::to_string(opts.video_bitrate));
+    cmd << (opts.use_cbr ? " --cbr" : " --vbr");
+    cmd << " --color-mode " << quote_argument(color_mode_to_string(opts.color_mode));
 
     if (opts.debug_overlay) {
         cmd << " --debug";
@@ -528,6 +559,11 @@ std::wstring build_command_line_w(const std::filesystem::path& renderer,
     std::wostringstream resolution;
     resolution << opts.video_width << L"x" << opts.video_height;
     cmd << L" --resolution " << quote_argument(resolution.str());
+
+    std::wstring bitrate = std::to_wstring(opts.video_bitrate);
+    cmd << L" --bitrate " << quote_argument(bitrate);
+    cmd << (opts.use_cbr ? L" --cbr" : L" --vbr");
+    cmd << L" --color-mode " << quote_argument(color_mode_to_wstring(opts.color_mode));
 
     if (opts.debug_overlay) {
         cmd << L" --debug";
@@ -927,8 +963,27 @@ int main(int argc, char* argv[]) {
         }
         ImGui::InputInt("Width", &options.video_width);
         ImGui::InputInt("Height", &options.video_height);
+        float bitrate_mbps = options.video_bitrate / 1000000.0f;
+        if (bitrate_mbps < 1.0f) {
+            bitrate_mbps = 1.0f;
+        }
+        if (ImGui::DragFloat("Video Bitrate (Mbps)", &bitrate_mbps, 1.0f, 1.0f, 1000.0f, "%.1f")) {
+            bitrate_mbps = std::max(1.0f, bitrate_mbps);
+            options.video_bitrate = static_cast<int>(bitrate_mbps * 1000000.0f);
+        }
+        ImGui::Text("Bitrate: %d bps", options.video_bitrate);
+        ImGui::Checkbox("Constant Bitrate (CBR)", &options.use_cbr);
         ImGui::Checkbox("Debug overlay", &options.debug_overlay);
         ImGui::Checkbox("Show preview window", &options.show_preview);
+
+        const char* color_mode_items[] = {"Channel", "Track", "Both"};
+        int color_mode_index_ui = static_cast<int>(options.color_mode);
+        if (ImGui::Combo("Blip color mode", &color_mode_index_ui, color_mode_items, IM_ARRAYSIZE(color_mode_items))) {
+            if (color_mode_index_ui < 0 || color_mode_index_ui > 2) {
+                color_mode_index_ui = 0;
+            }
+            options.color_mode = static_cast<RenderOptions::ColorMode>(color_mode_index_ui);
+        }
 
         bool audio_path_non_empty = std::strlen(audio_path_buffer.data()) > 0;
         if (audio_path_non_empty) {
@@ -974,6 +1029,8 @@ int main(int argc, char* argv[]) {
                 validation_message = "Please select a MIDI file.";
             } else if (options.video_width <= 0 || options.video_height <= 0) {
                 validation_message = "Resolution must be positive.";
+            } else if (options.video_bitrate <= 0) {
+                validation_message = "Bitrate must be positive.";
             } else if (audio_path && !std::filesystem::exists(*audio_path)) {
                 validation_message = "Audio file not found.";
             } else {
@@ -992,6 +1049,13 @@ int main(int argc, char* argv[]) {
 
         if (!can_start) {
             ImGui::EndDisabled();
+        }
+
+        if (status == JobStatus::Running) {
+            ImGui::SameLine();
+            if (ImGui::Button("Stop rendering", ImVec2(200, 0))) {
+                runner.terminate();
+            }
         }
 
         ImGui::Separator();

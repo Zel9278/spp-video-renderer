@@ -57,9 +57,18 @@ struct VideoOutputSettings {
     int width = 1920;               // 動画幅
     int height = 1080;              // 動画高さ
     int bitrate = 8000000;          // ビットレート (8000 kbps = 8 Mbps)
+    bool use_cbr = true;            // CBR (true) or VBR (false)
     bool save_frames = false;       // 個別フレームを保存するか（FFmpegを使用する場合は不要）
     std::string frame_format = "png"; // フレーム形式 (png, jpg, bmp)
     std::string video_codec = "h264"; // 動画コーデック
+
+    enum class ColorMode {
+        Channel,
+        Track,
+        Both
+    };
+
+    ColorMode color_mode = ColorMode::Channel;
     
     // 再生設定
     float playback_speed = 1.0f;    // 再生速度倍率
@@ -251,7 +260,7 @@ private:
     
     // 内部メソッド
     void ProcessMidiEvents(double current_time);
-    void ProcessNoteEvent(const MidiEvent& event, double event_time);
+    void ProcessNoteEvent(const MidiEvent& event, double event_time, size_t track_index);
     void UpdateActiveNotes(double current_time);
     void ResetStreamingState();
     void ClearStreamingResources();
@@ -268,7 +277,8 @@ private:
     bool InitializeFFmpeg();
     void FinalizeFFmpeg();
     bool WriteFrameToFFmpeg(const std::vector<uint8_t>& frame_data);
-    std::vector<std::string> GetCodecSpecificSettings(const std::string& codec) const;
+    std::vector<std::string> GetCodecSpecificSettings(const std::string& codec, bool use_cbr) const;
+    Color DetermineBlipColor(uint8_t channel, size_t track_index) const;
     
     // テンポ管理
     uint32_t current_tempo_; // マイクロ秒/四分音符
@@ -295,4 +305,34 @@ namespace FrameCapture {
                   int width, int height, int quality = 90);
     bool SaveBMP(const std::string& filepath, const std::vector<uint8_t>& rgba_data, 
                  int width, int height);
+}
+
+// MIDIトラック用カラーパレット
+namespace MidiTrackColors {
+    static const Color TRACK_COLORS[16] = {
+        Color::FromHex(0xFF5733),  // Track 0
+        Color::FromHex(0x33FF57),
+        Color::FromHex(0x3357FF),
+        Color::FromHex(0xFF33A8),
+        Color::FromHex(0x33FFF3),
+        Color::FromHex(0xFFC133),
+        Color::FromHex(0x9D33FF),
+        Color::FromHex(0xFF8333),
+        Color::FromHex(0x33FF9D),
+        Color::FromHex(0x3383FF),
+        Color::FromHex(0xFF33D4),
+        Color::FromHex(0x33FFD4),
+        Color::FromHex(0xFFD633),
+        Color::FromHex(0x7B33FF),
+        Color::FromHex(0xFF3333),
+        Color::FromHex(0x33FF33),
+    };
+
+    inline Color GetTrackColor(size_t track_index) {
+        constexpr size_t count = sizeof(TRACK_COLORS) / sizeof(TRACK_COLORS[0]);
+        if (count == 0) {
+            return Color::FromHex(0xFFFFFF);
+        }
+        return TRACK_COLORS[track_index % count];
+    }
 }

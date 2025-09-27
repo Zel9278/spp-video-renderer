@@ -362,6 +362,7 @@ bool MidiVideoOutput::StartVideoOutput(const VideoOutputSettings& settings) {
     std::cout << "  Resolution: " << settings.width << "x" << settings.height << std::endl;
     std::cout << "  FPS: " << settings.fps << std::endl;
     std::cout << "  Bitrate: " << settings.bitrate << " bps" << std::endl;
+    std::cout << "  Rate control: " << (settings.use_cbr ? "CBR" : "VBR") << std::endl;
     if (video_settings_.include_audio) {
         std::cout << "  Audio file: " << video_settings_.audio_file_path << std::endl;
         std::cout << "  Audio codec: aac" << std::endl;
@@ -669,7 +670,7 @@ void MidiVideoOutput::ProcessMidiEvents(double current_time) {
             debug_count++;
         }
 
-        ProcessNoteEvent(track_state.current_event, track_state.event_time);
+    ProcessNoteEvent(track_state.current_event, track_state.event_time, next.track_index);
         midi_free_event(&track_state.current_event);
         track_state.current_event = MidiEvent{};
         track_state.has_event = false;
@@ -757,10 +758,11 @@ bool MidiVideoOutput::LoadNextTrackEvent(size_t track_index) {
     return false;
 }
 
-void MidiVideoOutput::ProcessNoteEvent(const MidiEvent& event, double event_time) {
+void MidiVideoOutput::ProcessNoteEvent(const MidiEvent& event, double event_time, size_t track_index) {
     if (!piano_keyboard_) {
         return;
     }
+    (void)event_time;
     
     if (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 > 0) {
         // ノートオン
@@ -770,9 +772,9 @@ void MidiVideoOutput::ProcessNoteEvent(const MidiEvent& event, double event_time
             active_notes_[note] = true;
             note_press_times_[note] = std::chrono::steady_clock::now();
             
-            // MIDIチャンネル固有の色でブリップエフェクトを常に追加
-            Color channel_color = MidiChannelColors::GetChannelColor(event.channel);
-            piano_keyboard_->AddKeyBlip(note, channel_color);
+            // 選択されたカラーモードに基づいたブリップエフェクトを追加
+            const Color blip_color = DetermineBlipColor(event.channel, track_index);
+            piano_keyboard_->AddKeyBlip(note, blip_color);
         }
     } else if (event.eventType == MIDI_EVENT_NOTE_OFF || 
                (event.eventType == MIDI_EVENT_NOTE_ON && event.data2 == 0)) {
@@ -1069,6 +1071,17 @@ void MidiVideoOutput::RenderVideoOutputUI() {
         ImGui::SliderInt("FPS", &video_settings_.fps, 24, 120);
         ImGui::SliderInt("Width", &video_settings_.width, 640, 3840);
         ImGui::SliderInt("Height", &video_settings_.height, 480, 2160);
+
+        float bitrate_mbps = video_settings_.bitrate / 1000000.0f;
+        if (bitrate_mbps < 1.0f) {
+            bitrate_mbps = 1.0f;
+        }
+        if (ImGui::DragFloat("Video Bitrate (Mbps)", &bitrate_mbps, 1.0f, 1.0f, 1000.0f, "%.1f")) {
+            bitrate_mbps = std::max(1.0f, bitrate_mbps);
+            video_settings_.bitrate = static_cast<int>(bitrate_mbps * 1000000.0f);
+        }
+        ImGui::Text("Bitrate: %d bps", video_settings_.bitrate);
+        ImGui::Checkbox("Constant Bitrate (CBR)", &video_settings_.use_cbr);
         
         const char* formats[] = {"png", "jpg", "bmp"};
         static int format_index = 0;
@@ -1141,7 +1154,7 @@ namespace FrameCapture {
 }
 
 // コーデック固有の設定を取得するヘルパー関数
-std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::string& codec) const {
+std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::string& codec, bool use_cbr) const {
     std::vector<std::string> settings;
     
     if (codec == "libx264") {
@@ -1150,8 +1163,13 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("ultrafast");
         settings.push_back("-tune");
         settings.push_back("zerolatency");
-        settings.push_back("-crf");
-        settings.push_back("23");
+        if (use_cbr) {
+            settings.push_back("-x264-params");
+            settings.push_back("nal-hrd=cbr:force-cfr=1");
+        } else {
+            settings.push_back("-crf");
+            settings.push_back("23");
+        }
         settings.push_back("-threads");
         settings.push_back("0");
     } else if (codec == "libx265") {
@@ -1160,8 +1178,13 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("ultrafast");
         settings.push_back("-tune");
         settings.push_back("zerolatency");
-        settings.push_back("-crf");
-        settings.push_back("28"); // H.265は少し高い値でも同等品質
+        if (use_cbr) {
+            settings.push_back("-x265-params");
+            settings.push_back("nal-hrd=cbr:force-cfr=1");
+        } else {
+            settings.push_back("-crf");
+            settings.push_back("28"); // H.265は少し高い値でも同等品質
+        }
         settings.push_back("-threads");
         settings.push_back("0");
     } else if (codec == "h264_nvenc") {
@@ -1171,7 +1194,11 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("-tune");
         settings.push_back("ll"); // 低遅延 (NVENC用)
         settings.push_back("-rc");
-        settings.push_back("cbr"); // CBR レート制御
+        settings.push_back(use_cbr ? "cbr" : "vbr");
+        if (!use_cbr) {
+            settings.push_back("-cq");
+            settings.push_back("19");
+        }
         settings.push_back("-gpu");
         settings.push_back("0"); // GPU 0を使用
     } else if (codec == "hevc_nvenc") {
@@ -1181,7 +1208,11 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("-tune");
         settings.push_back("ll"); // 低遅延
         settings.push_back("-rc");
-        settings.push_back("cbr"); // CBR レート制御
+        settings.push_back(use_cbr ? "cbr" : "vbr");
+        if (!use_cbr) {
+            settings.push_back("-cq");
+            settings.push_back("19");
+        }
         settings.push_back("-gpu");
         settings.push_back("0"); // GPU 0を使用
     } else if (codec == "h264_qsv") {
@@ -1190,16 +1221,20 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("veryfast");
         settings.push_back("-look_ahead");
         settings.push_back("0"); // 先読み無効
-        settings.push_back("-global_quality");
-        settings.push_back("23");
+        if (!use_cbr) {
+            settings.push_back("-global_quality");
+            settings.push_back("23");
+        }
     } else if (codec == "hevc_qsv") {
         // Intel Quick Sync Video H.265/HEVC ハードウェアエンコーダー
         settings.push_back("-preset");
         settings.push_back("veryfast");
         settings.push_back("-look_ahead");
         settings.push_back("0");
-        settings.push_back("-global_quality");
-        settings.push_back("28");
+        if (!use_cbr) {
+            settings.push_back("-global_quality");
+            settings.push_back("28");
+        }
     } else if (codec == "libvpx-vp9") {
         // VP9 ソフトウェアエンコーダー
         settings.push_back("-deadline");
@@ -1213,13 +1248,13 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
         settings.push_back("-quality");
         settings.push_back("speed"); // 速度優先
         settings.push_back("-rc");
-        settings.push_back("cbr");
+        settings.push_back(use_cbr ? "cbr" : "vbr_quality");
     } else if (codec == "hevc_amf") {
         // AMD AMF H.265/HEVC ハードウェアエンコーダー
         settings.push_back("-quality");
         settings.push_back("speed");
         settings.push_back("-rc");
-        settings.push_back("cbr");
+        settings.push_back(use_cbr ? "cbr" : "vbr_quality");
     } else {
         // 未知のコーデック: 基本設定のみ
         std::cout << "Warning: Unknown codec '" << codec << "', using basic settings" << std::endl;
@@ -1230,6 +1265,27 @@ std::vector<std::string> MidiVideoOutput::GetCodecSpecificSettings(const std::st
     return settings;
 }
 
+    Color MidiVideoOutput::DetermineBlipColor(uint8_t channel, size_t track_index) const {
+        const Color channel_color = MidiChannelColors::GetChannelColor(channel);
+        const Color track_color = MidiTrackColors::GetTrackColor(track_index);
+
+        switch (video_settings_.color_mode) {
+            case VideoOutputSettings::ColorMode::Track:
+                return track_color;
+            case VideoOutputSettings::ColorMode::Both: {
+                Color blended;
+                blended.r = std::clamp((channel_color.r + track_color.r) * 0.5f, 0.0f, 1.0f);
+                blended.g = std::clamp((channel_color.g + track_color.g) * 0.5f, 0.0f, 1.0f);
+                blended.b = std::clamp((channel_color.b + track_color.b) * 0.5f, 0.0f, 1.0f);
+                blended.a = std::clamp((channel_color.a + track_color.a) * 0.5f, 0.0f, 1.0f);
+                return blended;
+            }
+            case VideoOutputSettings::ColorMode::Channel:
+            default:
+                return channel_color;
+        }
+    }
+
 // FFmpeg関連のメソッド実装
 bool MidiVideoOutput::InitializeFFmpeg() {
     if (ffmpeg_process_) {
@@ -1237,7 +1293,7 @@ bool MidiVideoOutput::InitializeFFmpeg() {
     }
     
     // コーデックに応じた設定を取得
-    auto codec_settings = GetCodecSpecificSettings(video_settings_.video_codec);
+    auto codec_settings = GetCodecSpecificSettings(video_settings_.video_codec, video_settings_.use_cbr);
     
     // FFmpegコマンドを構築
     std::stringstream cmd;
@@ -1257,9 +1313,16 @@ bool MidiVideoOutput::InitializeFFmpeg() {
         cmd << " " << setting;
     }
     
-    cmd << " -b:v " << video_settings_.bitrate; // ビットレート
-    cmd << " -maxrate " << video_settings_.bitrate; // 最大ビットレート
-    cmd << " -bufsize " << (video_settings_.bitrate * 2); // バッファサイズ
+    bool skip_bitrate_flag = !video_settings_.use_cbr &&
+        (video_settings_.video_codec == "libx264" || video_settings_.video_codec == "libx265");
+
+    if (video_settings_.bitrate > 0 && !skip_bitrate_flag) {
+        cmd << " -b:v " << video_settings_.bitrate; // ビットレート
+        if (video_settings_.use_cbr) {
+            cmd << " -maxrate " << video_settings_.bitrate; // 最大ビットレート
+            cmd << " -bufsize " << (video_settings_.bitrate * 2); // バッファサイズ
+        }
+    }
     if (video_settings_.include_audio) {
         cmd << " -c:a aac";
         int kbps = std::max(1, video_settings_.audio_bitrate / 1000);

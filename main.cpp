@@ -3,11 +3,14 @@
 #include <iostream>
 #include <memory>
 #include <cstring>
+#include <cctype>
+#include <cmath>
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
 #include <vector>
 #include <stdexcept>
+#include <limits>
 
 #include "opengl_renderer.h"
 #include "piano_keyboard.h"
@@ -40,6 +43,18 @@ static std::string FormatTime(double seconds) {
     return oss.str();
 }
 
+static const char* ColorModeToString(VideoOutputSettings::ColorMode mode) {
+    switch (mode) {
+        case VideoOutputSettings::ColorMode::Channel:
+            return "channel";
+        case VideoOutputSettings::ColorMode::Track:
+            return "track";
+        case VideoOutputSettings::ColorMode::Both:
+            return "both";
+    }
+    return "channel";
+}
+
 // Global variables
 std::unique_ptr<OpenGLRenderer> g_renderer;
 std::unique_ptr<PianoKeyboard> g_piano_keyboard;
@@ -47,6 +62,84 @@ std::unique_ptr<MidiVideoOutput> g_midi_video_output;
 
 // GLFW callback functions
 void error_callback(int error, const char* description);
+
+// Command line options struct
+static int ParseBitrateOption(const std::string& input) {
+    std::string compact;
+    compact.reserve(input.size());
+    for (char ch : input) {
+        if (!std::isspace(static_cast<unsigned char>(ch))) {
+            compact.push_back(ch);
+        }
+    }
+
+    if (compact.empty()) {
+        throw std::invalid_argument("Bitrate value is empty");
+    }
+
+    std::string lowercase;
+    lowercase.reserve(compact.size());
+    for (char ch : compact) {
+        lowercase.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+
+    auto strip_suffix = [&](const std::string& suffix) {
+        if (lowercase.size() >= suffix.size() &&
+            lowercase.compare(lowercase.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            lowercase.erase(lowercase.size() - suffix.size());
+            compact.erase(compact.size() - suffix.size());
+            return true;
+        }
+        return false;
+    };
+
+    double multiplier = 1.0;
+    if (strip_suffix("kbps")) {
+        multiplier = 1000.0;
+    } else if (strip_suffix("mbps")) {
+        multiplier = 1000000.0;
+    } else if (strip_suffix("gbps")) {
+        multiplier = 1000000000.0;
+    } else if (!compact.empty()) {
+        char last = static_cast<char>(std::tolower(static_cast<unsigned char>(compact.back())));
+        if (last == 'k') {
+            compact.pop_back();
+            lowercase.pop_back();
+            multiplier = 1000.0;
+        } else if (last == 'm') {
+            compact.pop_back();
+            lowercase.pop_back();
+            multiplier = 1000000.0;
+        } else if (last == 'g') {
+            compact.pop_back();
+            lowercase.pop_back();
+            multiplier = 1000000000.0;
+        }
+    }
+
+    if (compact.empty()) {
+        throw std::invalid_argument("Bitrate value has no numeric component");
+    }
+
+    double numeric = 0.0;
+    try {
+        numeric = std::stod(compact);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("Failed to parse bitrate numeric value");
+    }
+
+    double result = numeric * multiplier;
+    if (result <= 0.0) {
+        throw std::invalid_argument("Bitrate must be positive");
+    }
+
+    double max_int = static_cast<double>(std::numeric_limits<int>::max());
+    if (result > max_int) {
+        throw std::out_of_range("Bitrate value exceeds supported range");
+    }
+
+    return static_cast<int>(std::llround(result));
+}
 
 // Command line options struct
 struct CommandLineOptions {
@@ -57,6 +150,9 @@ struct CommandLineOptions {
     bool show_preview = false;
     int video_width = DEFAULT_VIDEO_WIDTH;
     int video_height = DEFAULT_VIDEO_HEIGHT;
+    bool use_cbr = true;
+    int video_bitrate = 240000000;
+    VideoOutputSettings::ColorMode color_mode = VideoOutputSettings::ColorMode::Channel;
 };
 
 // Parse command line arguments
@@ -68,10 +164,14 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "   or: " << argv[0] << " <midi_file> [options]" << std::endl;
         std::cerr << "Options:" << std::endl;
         std::cerr << "  --video-codec, -vc <codec>  Video codec for FFmpeg (default: libx264)" << std::endl;
-    std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
-    std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
-    std::cerr << "  --resolution, -r <WxH>      Set video resolution (default: 1920x1080)" << std::endl;
-    std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
+        std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
+        std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
+        std::cerr << "  --resolution, -r <WxH>      Set video resolution (default: 1920x1080)" << std::endl;
+        std::cerr << "  --bitrate, -br <value>     Set video bitrate (accepts suffixes like 20M, 5000k, 25mbps)" << std::endl;
+        std::cerr << "  --cbr                       Force constant bitrate encoding" << std::endl;
+        std::cerr << "  --vbr, --no-cbr             Use variable bitrate encoding" << std::endl;
+        std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
+    std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -91,7 +191,8 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "  " << argv[0] << " song.mid" << std::endl;
         std::cerr << "  " << argv[0] << " --video-codec h264_nvenc song.mid" << std::endl;
         std::cerr << "  " << argv[0] << " song.mid -vc libx265" << std::endl;
-    std::cerr << "  " << argv[0] << " song.mid -r 2560x1440" << std::endl;
+        std::cerr << "  " << argv[0] << " song.mid -r 2560x1440" << std::endl;
+        std::cerr << "  " << argv[0] << " song.mid --bitrate 40M --vbr" << std::endl;
         std::cerr << "  " << argv[0] << " -d song.mid --video-codec hevc_nvenc" << std::endl;
         exit(-1);
     }
@@ -152,10 +253,52 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                     std::cerr << "Error: " << arg << " requires a file path" << std::endl;
                     exit(-1);
                 }
+            } else if (arg == "--bitrate" || arg == "-br") {
+                if (i + 1 < argc) {
+                    std::string value = argv[i + 1];
+                    try {
+                        options.video_bitrate = ParseBitrateOption(value);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Error: Invalid bitrate '" << value << "': " << e.what() << std::endl;
+                        exit(-1);
+                    }
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a value" << std::endl;
+                    exit(-1);
+                }
+            } else if (arg == "--cbr") {
+                options.use_cbr = true;
+            } else if (arg == "--vbr" || arg == "--no-cbr") {
+                options.use_cbr = false;
             } else if (arg == "--debug" || arg == "-d") {
                 options.debug_mode = true;
             } else if (arg == "--show-preview" || arg == "-sp") {
                 options.show_preview = true;
+            } else if (arg == "--color-mode" || arg == "-cm") {
+                if (i + 1 < argc) {
+                    std::string value = argv[i + 1];
+                    std::string lowercase;
+                    lowercase.reserve(value.size());
+                    for (char ch : value) {
+                        lowercase.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+                    }
+
+                    if (lowercase == "channel") {
+                        options.color_mode = VideoOutputSettings::ColorMode::Channel;
+                    } else if (lowercase == "track") {
+                        options.color_mode = VideoOutputSettings::ColorMode::Track;
+                    } else if (lowercase == "both") {
+                        options.color_mode = VideoOutputSettings::ColorMode::Both;
+                    } else {
+                        std::cerr << "Error: Invalid color mode '" << value << "'. Supported values are channel, track, both." << std::endl;
+                        exit(-1);
+                    }
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a value" << std::endl;
+                    exit(-1);
+                }
             } else if (arg == "--help" || arg == "-h") {
                 // Show help and exit
                 std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
@@ -165,7 +308,11 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "  --debug, -d                 Show debug information overlay in video" << std::endl;
                 std::cerr << "  --audio-file, -af <path>    External audio file to mux with the render" << std::endl;
                 std::cerr << "  --resolution, -r <WxH>      Set video resolution (default: 1920x1080)" << std::endl;
+                std::cerr << "  --bitrate, -br <value>     Set video bitrate (accepts suffixes like 20M, 5000k, 25mbps)" << std::endl;
+                std::cerr << "  --cbr                       Force constant bitrate encoding" << std::endl;
+                std::cerr << "  --vbr, --no-cbr             Use variable bitrate encoding" << std::endl;
                 std::cerr << "  --show-preview, -sp         Display a 1280x720 preview window" << std::endl;
+                std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -205,6 +352,9 @@ int main(int argc, char* argv[]) {
     std::cout << "Debug mode: " << (options.debug_mode ? "enabled" : "disabled") << std::endl;
     std::cout << "Preview window: " << (options.show_preview ? "enabled (1280x720)" : "disabled") << std::endl;
     std::cout << "Video resolution: " << options.video_width << "x" << options.video_height << std::endl;
+    std::cout << "Rate control: " << (options.use_cbr ? "CBR" : "VBR") << std::endl;
+    std::cout << "Target bitrate: " << options.video_bitrate << " bps" << std::endl;
+    std::cout << "Blip color mode: " << ColorModeToString(options.color_mode) << std::endl;
 
     // Get the directory of the executable for output path
     std::filesystem::path exe_path(argv[0]);
@@ -338,10 +488,12 @@ int main(int argc, char* argv[]) {
     video_settings.width = video_width;
     video_settings.height = video_height;
     video_settings.fps = 60;
-    video_settings.bitrate = 240000000; // 8 Mbps
+    video_settings.bitrate = options.video_bitrate;
+    video_settings.use_cbr = options.use_cbr;
     video_settings.output_path = output_path.string(); // Use the calculated output path
     video_settings.video_codec = options.video_codec; // Use command line specified codec
     video_settings.show_debug_info = options.debug_mode; // Enable debug overlay if requested
+    video_settings.color_mode = options.color_mode;
     if (!options.audio_file.empty()) {
         video_settings.include_audio = true;
         video_settings.audio_file_path = options.audio_file;
@@ -354,6 +506,7 @@ int main(int argc, char* argv[]) {
     std::cout << "  Debug overlay: " << (video_settings.show_debug_info ? "enabled" : "disabled") << std::endl;
     std::cout << "  Audio file: " << (video_settings.include_audio ? video_settings.audio_file_path : "(none)") << std::endl;
     std::cout << "  Output path: " << video_settings.output_path << std::endl;
+    std::cout << "  Blip color mode: " << ColorModeToString(video_settings.color_mode) << std::endl;
     g_midi_video_output->SetVideoSettings(video_settings);
 
     // Start recording video
@@ -461,7 +614,8 @@ int main(int argc, char* argv[]) {
                           << " | " << preview_settings.width << "x" << preview_settings.height
                           << "@" << preview_settings.fps << "fps"
                           << " | " << std::fixed << std::setprecision(1)
-                          << (preview_settings.bitrate / 1000000.0f) << " Mbps";
+                          << (preview_settings.bitrate / 1000000.0f) << " Mbps"
+                          << " (" << (preview_settings.use_cbr ? "CBR" : "VBR") << ")";
             overlay_lines.push_back(ffmpeg_stream.str());
 
             std::ostringstream audio_stream;
