@@ -34,8 +34,8 @@ target("MPP Video Renderer")
 
     -- System libraries for Windows
     if is_plat("windows") then
-        add_links("opengl32", "gdi32", "user32", "kernel32", "shell32")
-        add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32")
+    add_links("opengl32", "gdi32", "user32", "kernel32", "shell32")
+    add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "comdlg32")
     end
 
     -- Add packages
@@ -261,3 +261,23 @@ target("midi_example")
 -- Apply custom rule to main target
 target("MPP Video Renderer")
     add_rules("check_dependencies")
+
+-- ImGui-based launcher
+target("MPP Video Renderer Launcher")
+    set_kind("binary")
+    set_default(false)
+
+    add_files("launcher/launcher_main.cpp")
+    add_includedirs("launcher")
+
+    if is_plat("windows") then
+        add_defines("UNICODE", "_UNICODE", "NOMINMAX", "WIN32_LEAN_AND_MEAN")
+        add_cxflags("/utf-8")
+        add_links("opengl32", "gdi32", "user32", "kernel32", "shell32")
+        add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32")
+    elseif is_plat("linux") then
+        add_links("dl", "pthread", "m", "GL")
+        add_links("X11", "Xcursor", "Xrandr", "Xinerama", "Xi", "Xext")
+    end
+
+    add_packages("glfw", "glad", "imgui")
