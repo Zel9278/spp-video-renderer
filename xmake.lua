@@ -12,22 +12,34 @@ if is_plat("windows") then
     add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb")
 elseif is_plat("linux") then
     -- For NixOS: Only use packages that can't be provided by system
-    add_requires("glad", "stb", "imgui[glfw_opengl3]")
+    add_requires("glad", "imgui[glfw_opengl3]", "stb")
 end
 
 -- Define the target
 target("MPP Video Renderer")
     set_kind("binary")
     set_default(true)
+    add_rules("utils.bin2c", {extensions = {".ico", ".png"}})
 
     -- Add source files
-    add_files("main.cpp", "opengl_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp")
+    add_files("main.cpp", "opengl_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp", "resources/window_icon_loader.cpp")
+    add_files("resources/icon.png")
 
     -- Add header files
     add_headerfiles("*.h")
 
+    -- Add Windows resource file
+    if is_plat("windows") then
+        add_files("resources/app.rc", "resources/icon.ico")
+    end
+
     -- Add include directories
     add_includedirs(".", "midi-parser")
+    on_config(function (target)
+        local generated_dir = target:autogendir() .. "/rules/utils/bin2c"
+        os.mkdir(generated_dir)
+        target:add("includedirs", generated_dir)
+    end)
 
     -- Add dependency on midi_parser library
     add_deps("midi_parser")
@@ -266,9 +278,24 @@ target("MPP Video Renderer")
 target("MPP Video Renderer Launcher")
     set_kind("binary")
     set_default(true)
+    add_rules("utils.bin2c", {extensions = {".ico", ".png"}})
 
-    add_files("launcher/launcher_main.cpp")
+    add_files("launcher/launcher_main.cpp", "resources/window_icon_loader.cpp", "resources/icon.png")
     add_includedirs("launcher")
+    if is_plat("windows") then
+        add_files("resources/icon.ico")
+    end
+
+    on_config(function (target)
+        local generated_dir = target:autogendir() .. "/rules/utils/bin2c"
+        os.mkdir(generated_dir)
+        target:add("includedirs", generated_dir)
+    end)
+
+    -- Add Windows resource file
+    if is_plat("windows") then
+        add_files("resources/launcher.rc")
+    end
 
     if is_plat("windows") then
         add_defines("UNICODE", "_UNICODE", "NOMINMAX", "WIN32_LEAN_AND_MEAN")
@@ -280,4 +307,4 @@ target("MPP Video Renderer Launcher")
         add_links("X11", "Xcursor", "Xrandr", "Xinerama", "Xi", "Xext")
     end
 
-    add_packages("glfw", "glad", "imgui")
+    add_packages("glfw", "glad", "imgui", "stb")

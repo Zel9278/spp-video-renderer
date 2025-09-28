@@ -31,6 +31,8 @@
 #include <thread>
 #include <vector>
 #include <vector>
+#include <cstdlib>
+#include <cstddef>
 #ifndef _WIN32
 #include <cerrno>
 #include <csignal>
@@ -43,13 +45,69 @@
 #define GLFW_EXPOSE_NATIVE_WIN32
 #include <GLFW/glfw3native.h>
 #include <windows.h>
+#include "../resources/launcher_resource.h"
 #include <shlobj_core.h>
 #include <combaseapi.h>
 #include <commdlg.h>
 #pragma comment(lib, "Comdlg32.lib")
 #endif
 
+#include "../resources/window_icon_loader.h"
+
 namespace {
+
+static const unsigned char kLauncherIconPng[] = {
+#include "icon.png.h"
+};
+static constexpr std::size_t kLauncherIconPngSize = sizeof(kLauncherIconPng);
+
+static void SetFallbackWindowIcon(GLFWwindow* window) {
+    // Create a simple 32x32 launcher-themed icon
+    const int size = 32;
+    unsigned char* pixels = new unsigned char[size * size * 4];
+    
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int idx = (y * size + x) * 4;
+            
+            // Create a play button / launcher icon pattern
+            int center_x = size / 2;
+            int center_y = size / 2;
+            int dx = x - center_x;
+            int dy = y - center_y;
+            
+            // Triangle play button shape
+            bool is_in_triangle = (dx > -8 && dx < 8 && dy > -6 && dy < 6) && (dx > dy * -0.5 - 4);
+            
+            if (is_in_triangle) {
+                // Play button (green)
+                pixels[idx + 0] = 50;   // R
+                pixels[idx + 1] = 200;  // G
+                pixels[idx + 2] = 50;   // B
+            } else {
+                // Background (light blue)
+                pixels[idx + 0] = 100;  // R
+                pixels[idx + 1] = 150;  // G
+                pixels[idx + 2] = 255;  // B
+            }
+            pixels[idx + 3] = 255;      // A (fully opaque)
+        }
+    }
+    
+    GLFWimage icon;
+    icon.width = size;
+    icon.height = size;
+    icon.pixels = pixels;
+    
+    glfwSetWindowIcon(window, 1, &icon);
+    delete[] pixels;
+}
+
+static void SetWindowIcon(GLFWwindow* window) {
+    if (!window_icon::SetWindowIconFromPng(window, kLauncherIconPng, kLauncherIconPngSize)) {
+        SetFallbackWindowIcon(window);
+    }
+}
 
 enum class JobStatus {
     Idle,
@@ -910,6 +968,9 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return -1;
     }
+    
+    // Set window icon
+    SetWindowIcon(window);
 
     glfwMakeContextCurrent(window);
     glfwSwapInterval(1);

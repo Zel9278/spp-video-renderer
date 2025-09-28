@@ -1,4 +1,7 @@
 #include <glad/glad.h>
+#ifndef GLFW_INCLUDE_NONE
+#define GLFW_INCLUDE_NONE
+#endif
 #include <GLFW/glfw3.h>
 #include <iostream>
 #include <memory>
@@ -11,10 +14,19 @@
 #include <vector>
 #include <stdexcept>
 #include <limits>
+#include <cstdlib>
+#include <cstddef>
 
 #include "opengl_renderer.h"
 #include "piano_keyboard.h"
 #include "midi_video_output.h"
+
+#include "resources/window_icon_loader.h"
+
+static const unsigned char kWindowIconPng[] = {
+#include "icon.png.h"
+};
+static constexpr std::size_t kWindowIconPngSize = sizeof(kWindowIconPng);
 
 // Default video output resolution
 constexpr int DEFAULT_VIDEO_WIDTH = 1920;
@@ -22,6 +34,49 @@ constexpr int DEFAULT_VIDEO_HEIGHT = 1080;
 constexpr int PREVIEW_WIDTH = 1280;
 constexpr int PREVIEW_HEIGHT = 720;
 constexpr const char* WINDOW_TITLE = "OpenGL Piano Keyboard";
+
+static void SetFallbackWindowIcon(GLFWwindow* window) {
+    // Create a simple 32x32 piano-themed icon
+    const int size = 32;
+    unsigned char* pixels = new unsigned char[size * size * 4];
+    
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int idx = (y * size + x) * 4;
+            
+            // Create a piano keyboard pattern
+            bool is_black_key_area = (y < size * 0.6); // Top 60% for black keys
+            bool is_black_key = is_black_key_area && ((x / 3) % 2 == 1);
+            
+            if (is_black_key) {
+                // Black keys
+                pixels[idx + 0] = 30;   // R
+                pixels[idx + 1] = 30;   // G
+                pixels[idx + 2] = 30;   // B
+            } else {
+                // White keys and background
+                pixels[idx + 0] = 250;  // R
+                pixels[idx + 1] = 250;  // G
+                pixels[idx + 2] = 250;  // B
+            }
+            pixels[idx + 3] = 255;      // A (fully opaque)
+        }
+    }
+    
+    GLFWimage icon;
+    icon.width = size;
+    icon.height = size;
+    icon.pixels = pixels;
+    
+    glfwSetWindowIcon(window, 1, &icon);
+    delete[] pixels;
+}
+
+static void SetWindowIcon(GLFWwindow* window) {
+    if (!window_icon::SetWindowIconFromPng(window, kWindowIconPng, kWindowIconPngSize)) {
+        SetFallbackWindowIcon(window);
+    }
+}
 
 static std::string FormatTime(double seconds) {
     if (seconds < 0.0) {
@@ -432,6 +487,9 @@ int main(int argc, char* argv[]) {
         glfwTerminate();
         return -1;
     }
+    
+    // Set window icon
+    SetWindowIcon(window);
 
     GLFWwindow* preview_window = nullptr;
 
@@ -461,6 +519,7 @@ int main(int argc, char* argv[]) {
 
         preview_window = glfwCreateWindow(PREVIEW_WIDTH, PREVIEW_HEIGHT, "Rendering Preview", nullptr, window);
         if (preview_window) {
+            SetWindowIcon(preview_window);
             glfwMakeContextCurrent(preview_window);
             gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
             glfwSwapInterval(1);

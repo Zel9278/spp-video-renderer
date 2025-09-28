@@ -19,10 +19,6 @@
 #include <sys/types.h>
 #endif
 
-// STB Image Write for saving images
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include <stb_image_write.h>
-
 MidiVideoOutput::MidiVideoOutput()
     : playback_state_(MidiPlaybackState::Stopped)
     , midi_file_(nullptr)
@@ -951,11 +947,11 @@ bool MidiVideoOutput::SaveFrameToFile(const std::string& filepath) {
     
     // 形式に応じて保存
     if (video_settings_.frame_format == "png") {
-        return FrameCapture::SavePNG(filepath, pixels, video_settings_.width, video_settings_.height);
+        return false; // STB dependency removed - PNG saving disabled
     } else if (video_settings_.frame_format == "jpg" || video_settings_.frame_format == "jpeg") {
-        return FrameCapture::SaveJPEG(filepath, pixels, video_settings_.width, video_settings_.height);
+        return false; // STB dependency removed - JPEG saving disabled
     } else if (video_settings_.frame_format == "bmp") {
-        return FrameCapture::SaveBMP(filepath, pixels, video_settings_.width, video_settings_.height);
+        return false; // STB dependency removed - BMP saving disabled
     }
     
     return false;
@@ -1122,35 +1118,6 @@ void MidiVideoOutput::RenderVideoOutputUI() {
         }
     }
     ImGui::End();
-}
-
-// FrameCapture namespace implementation
-namespace FrameCapture {
-    bool SavePNG(const std::string& filepath, const std::vector<uint8_t>& rgba_data, int width, int height) {
-        return stbi_write_png(filepath.c_str(), width, height, 4, rgba_data.data(), width * 4) != 0;
-    }
-    
-    bool SaveJPEG(const std::string& filepath, const std::vector<uint8_t>& rgba_data, int width, int height, int quality) {
-        // RGBAからRGBに変換
-        std::vector<uint8_t> rgb_data(width * height * 3);
-        for (int i = 0; i < width * height; i++) {
-            rgb_data[i * 3 + 0] = rgba_data[i * 4 + 0]; // R
-            rgb_data[i * 3 + 1] = rgba_data[i * 4 + 1]; // G
-            rgb_data[i * 3 + 2] = rgba_data[i * 4 + 2]; // B
-        }
-        return stbi_write_jpg(filepath.c_str(), width, height, 3, rgb_data.data(), quality) != 0;
-    }
-    
-    bool SaveBMP(const std::string& filepath, const std::vector<uint8_t>& rgba_data, int width, int height) {
-        // RGBAからRGBに変換
-        std::vector<uint8_t> rgb_data(width * height * 3);
-        for (int i = 0; i < width * height; i++) {
-            rgb_data[i * 3 + 0] = rgba_data[i * 4 + 0]; // R
-            rgb_data[i * 3 + 1] = rgba_data[i * 4 + 1]; // G
-            rgb_data[i * 3 + 2] = rgba_data[i * 4 + 2]; // B
-        }
-        return stbi_write_bmp(filepath.c_str(), width, height, 3, rgb_data.data()) != 0;
-    }
 }
 
 // コーデック固有の設定を取得するヘルパー関数

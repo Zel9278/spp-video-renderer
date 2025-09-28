@@ -300,16 +300,6 @@ private:
     void UpdateDebugInfo();  // デバッグ情報の更新
 };
 
-// フレームキャプチャのヘルパー関数
-namespace FrameCapture {
-    bool SavePNG(const std::string& filepath, const std::vector<uint8_t>& rgba_data, 
-                 int width, int height);
-    bool SaveJPEG(const std::string& filepath, const std::vector<uint8_t>& rgba_data, 
-                  int width, int height, int quality = 90);
-    bool SaveBMP(const std::string& filepath, const std::vector<uint8_t>& rgba_data, 
-                 int width, int height);
-}
-
 // MIDIトラック用カラーパレット
 namespace MidiTrackColors {
     static const Color TRACK_COLORS[16] = {
