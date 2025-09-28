@@ -5,6 +5,10 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -2,7 +2,8 @@
 
 #include <vector>
 #include <chrono>
-#include "opengl_renderer.h"
+
+#include "renderer.h"
 
 // Options structure for video output settings
 struct PianoOptions {
@@ -57,7 +58,7 @@ public:
     void Update();
     
     // Render the keyboard using OpenGL
-    void Render(OpenGLRenderer& renderer);
+    void Render(RendererBackend& renderer);
 
     // Handle mouse input
     void HandleInput(double mouse_x, double mouse_y, bool mouse_is_down);
@@ -134,10 +135,10 @@ private:
     bool IsBlackKey(int note) const;
     void CalculateKeyPositions();
     int GetWhiteKeyIndex(int note) const;
-    void RenderWhiteKeys(OpenGLRenderer& renderer);
-    void RenderBlackKeys(OpenGLRenderer& renderer);
-    void RenderWhiteKeyBlips(OpenGLRenderer& renderer);
-    void RenderBlackKeyBlips(OpenGLRenderer& renderer);
+    void RenderWhiteKeys(RendererBackend& renderer);
+    void RenderBlackKeys(RendererBackend& renderer);
+    void RenderWhiteKeyBlips(RendererBackend& renderer);
+    void RenderBlackKeyBlips(RendererBackend& renderer);
     int GetKeyAtPosition(const Vec2& pos) const;
 
     // Layout calculation helpers

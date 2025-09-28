@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 // 使用例とテストプログラム
 int main(int argc, char* argv[]) {
     if (argc != 2) {

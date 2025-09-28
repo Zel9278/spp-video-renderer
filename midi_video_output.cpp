@@ -10,9 +10,15 @@
 #include <cmath>
 #include <imgui.h>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 #ifdef _WIN32
 #include <windows.h>
 #include <direct.h>
+#undef GetCurrentTime
+#undef DrawText
 #define mkdir(path, mode) _mkdir(path)
 #else
 #include <sys/stat.h>
@@ -56,7 +62,7 @@ MidiVideoOutput::~MidiVideoOutput() {
     Cleanup();
 }
 
-bool MidiVideoOutput::Initialize(PianoKeyboard* piano_keyboard, OpenGLRenderer* renderer) {
+bool MidiVideoOutput::Initialize(PianoKeyboard* piano_keyboard, RendererBackend* renderer) {
     if (!piano_keyboard || !renderer) {
         std::cerr << "Error: Invalid piano_keyboard or renderer pointer" << std::endl;
         return false;
@@ -64,6 +70,10 @@ bool MidiVideoOutput::Initialize(PianoKeyboard* piano_keyboard, OpenGLRenderer* 
     
     piano_keyboard_ = piano_keyboard;
     renderer_ = renderer;
+
+    if (renderer_) {
+        video_settings_.use_gpu_optimized_capture = renderer_->SupportsAsyncReadback();
+    }
     
     // 初期設定
     video_settings_.output_path = "output_video";

@@ -22,7 +22,7 @@ target("MPP Video Renderer")
     add_rules("utils.bin2c", {extensions = {".ico", ".png"}})
 
     -- Add source files
-    add_files("main.cpp", "opengl_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp", "resources/window_icon_loader.cpp")
+    add_files("main.cpp", "opengl_renderer.cpp", "directx12_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp", "resources/window_icon_loader.cpp")
     add_files("resources/icon.png")
 
     -- Add header files
@@ -46,8 +46,8 @@ target("MPP Video Renderer")
 
     -- System libraries for Windows
     if is_plat("windows") then
-    add_links("opengl32", "gdi32", "user32", "kernel32", "shell32")
-    add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "comdlg32")
+    add_links("opengl32", "gdi32", "user32", "kernel32", "shell32", "d3d12", "dxgi", "d3dcompiler")
+    add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "comdlg32", "d3d12", "dxgi", "d3dcompiler")
     end
 
     -- Add packages
@@ -143,6 +143,8 @@ target("MPP Video Renderer")
     if is_plat("windows") then
         add_cxflags("/W3")  -- Warning level 3
         add_cxflags("/EHsc") -- Exception handling
+        add_cxflags("/utf-8")
+        add_cflags("/utf-8")
         add_defines("_CRT_SECURE_NO_WARNINGS")
         add_defines("NOMINMAX")
         add_defines("WIN32_LEAN_AND_MEAN")
@@ -205,6 +207,7 @@ target("midi_parser")
     if is_plat("windows") then
         add_cflags("/TC")  -- Compile as C
         add_cflags("/W3")  -- Warning level 3
+        add_cflags("/utf-8")
         add_defines("_CRT_SECURE_NO_WARNINGS")
     else
         add_defines("_GNU_SOURCE")
@@ -248,6 +251,7 @@ target("midi_example")
     if is_plat("windows") then
         add_cflags("/TC")  -- Compile as C
         add_cflags("/W3")  -- Warning level 3
+        add_cflags("/utf-8")
         add_defines("_CRT_SECURE_NO_WARNINGS")
     else
         add_defines("_GNU_SOURCE")

@@ -1,77 +1,14 @@
 #pragma once
 
 #if defined(_WIN32)
-#include <windows.h>
 #include <cstdint>
 #endif
 
 #include <GL/gl.h>
 #include <vector>
 #include <string>
-#include <algorithm>
 
-struct Vec2 {
-    float x, y;
-    Vec2() : x(0), y(0) {}
-    Vec2(float x_, float y_) : x(x_), y(y_) {}
-};
-
-struct Color {
-    float r, g, b, a;
-    Color() : r(1.0f), g(1.0f), b(1.0f), a(1.0f) {}
-    Color(float r_, float g_, float b_, float a_ = 1.0f) : r(r_), g(g_), b(b_), a(a_) {}
-    
-    // Convert from 0-255 range to 0-1 range
-    static Color FromRGB(int r, int g, int b, int a = 255) {
-        return Color(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
-    }
-
-    // Convert from uint32_t hex color (0xRRGGBB or 0xAARRGGBB)
-    static Color FromHex(uint32_t hex) {
-        if (hex <= 0xFFFFFF) {
-            // RGB format (0xRRGGBB)
-            int r = (hex >> 16) & 0xFF;
-            int g = (hex >> 8) & 0xFF;
-            int b = hex & 0xFF;
-            return FromRGB(r, g, b, 255);
-        } else {
-            // ARGB format (0xAARRGGBB)
-            int a = (hex >> 24) & 0xFF;
-            int r = (hex >> 16) & 0xFF;
-            int g = (hex >> 8) & 0xFF;
-            int b = hex & 0xFF;
-            return FromRGB(r, g, b, a);
-        }
-    }
-
-    // Convert to uint32_t hex color (0xRRGGBB format)
-    uint32_t ToHex() const {
-        int r_int = static_cast<int>(r * 255.0f);
-        int g_int = static_cast<int>(g * 255.0f);
-        int b_int = static_cast<int>(b * 255.0f);
-
-        // Clamp values to 0-255 range
-        r_int = std::max(0, std::min(255, r_int));
-        g_int = std::max(0, std::min(255, g_int));
-        b_int = std::max(0, std::min(255, b_int));
-
-        return (static_cast<uint32_t>(r_int) << 16) |
-               (static_cast<uint32_t>(g_int) << 8) |
-               static_cast<uint32_t>(b_int);
-    }
-};
-
-struct Rect {
-    Vec2 position;
-    Vec2 size;
-    Color color;
-    Color border_color;
-    float border_width;
-
-    Rect() : border_width(1.0f) {}
-    Rect(Vec2 pos, Vec2 sz, Color col)
-        : position(pos), size(sz), color(col), border_width(1.0f) {}
-};
+#include "renderer.h"
 
 // Font atlas for text rendering
 struct FontAtlas {
@@ -90,89 +27,91 @@ struct FontAtlas {
     FontAtlas() : texture_id(0), atlas_width(0), atlas_height(0), font_size(16.0f), loaded(false) {}
 };
 
-class OpenGLRenderer {
+class OpenGLRenderer : public RendererBackend {
 public:
     OpenGLRenderer();
     ~OpenGLRenderer();
     
     // Initialize the renderer
-    void Initialize(int window_width, int window_height);
+    void Initialize(int window_width, int window_height) override;
     
     // Set viewport size
-    void SetViewport(int width, int height);
+    void SetViewport(int width, int height) override;
     
     // Clear screen
-    void Clear(const Color& clear_color);
+    void Clear(const Color& clear_color) override;
 
     // Clear screen with radial gradient background
-    void ClearWithRadialGradient(const Color& center_color, const Color& edge_color);
+    void ClearWithRadialGradient(const Color& center_color, const Color& edge_color) override;
 
 
 
     // Clear screen with background image
-    void ClearWithImage(const std::string& image_path, float opacity, int scale_mode);
+    void ClearWithImage(const std::string& image_path, float opacity, int scale_mode) override;
 
     // Text rendering using embedded font
-    bool LoadFont(float font_size = 16.0f);
-    void DrawText(const std::string& text, const Vec2& position, const Color& color, float scale = 1.0f);
-    Vec2 GetTextSize(const std::string& text, float scale = 1.0f);
+    bool LoadFont(float font_size = 16.0f) override;
+    void DrawText(const std::string& text, const Vec2& position, const Color& color, float scale = 1.0f) override;
+    Vec2 GetTextSize(const std::string& text, float scale = 1.0f) override;
 
     // Draw a filled rectangle
-    void DrawRect(const Vec2& position, const Vec2& size, const Color& color);
+    void DrawRect(const Vec2& position, const Vec2& size, const Color& color) override;
 
     // Draw a rectangle with vertical gradient (top to bottom)
     void DrawRectGradient(const Vec2& position, const Vec2& size,
-                         const Color& top_color, const Color& bottom_color);
+                         const Color& top_color, const Color& bottom_color) override;
 
     // Draw a rectangle with vertical gradient and rounded corners
     void DrawRectGradientRounded(const Vec2& position, const Vec2& size,
                                 const Color& top_color, const Color& bottom_color,
-                                float corner_radius = 5.0f);
+                                float corner_radius = 5.0f) override;
 
     // Draw a rectangle with border
     void DrawRectWithBorder(const Vec2& position, const Vec2& size,
                            const Color& fill_color, const Color& border_color,
-                           float border_width = 1.0f);
+                           float border_width = 1.0f) override;
 
     // Draw a rectangle with rounded border
     void DrawRectWithRoundedBorder(const Vec2& position, const Vec2& size,
                                   const Color& fill_color, const Color& border_color,
-                                  float border_width = 1.0f, float corner_radius = 5.0f);
+                                  float border_width = 1.0f, float corner_radius = 5.0f) override;
     
     // Batch drawing for better performance
-    void BeginBatch();
-    void EndBatch();
+    void BeginBatch() override;
+    void EndBatch() override;
     
     // Frame operations for video recording
-    void BeginFrame();
-    void EndFrame();
+    void BeginFrame() override;
+    void EndFrame() override;
     
     // Offscreen rendering for headless mode
-    bool CreateOffscreenFramebuffer(int width, int height);
-    void BindOffscreenFramebuffer();
-    void UnbindOffscreenFramebuffer();
-    std::vector<uint8_t> ReadFramebuffer(int width, int height);
+    bool CreateOffscreenFramebuffer(int width, int height) override;
+    void BindOffscreenFramebuffer() override;
+    void UnbindOffscreenFramebuffer() override;
+    std::vector<uint8_t> ReadFramebuffer(int width, int height) override;
     
     // GPU-optimized frame capture with PBO
-    bool InitializePBO(int width, int height);
-    void CleanupPBO();
-    std::vector<uint8_t> ReadFramebufferPBO(int width, int height);
-    void StartAsyncReadback(int width, int height);
-    std::vector<uint8_t> GetAsyncReadbackResult(int width, int height);
+    bool InitializePBO(int width, int height) override;
+    void CleanupPBO() override;
+    std::vector<uint8_t> ReadFramebufferPBO(int width, int height) override;
+    void StartAsyncReadback(int width, int height) override;
+    std::vector<uint8_t> GetAsyncReadbackResult(int width, int height) override;
 
     // Preview rendering
-    void RenderOffscreenTextureToScreen(int screen_width, int screen_height);
+    void RenderOffscreenTextureToScreen(int screen_width, int screen_height) override;
     void RenderPreviewOverlay(int screen_width, int screen_height,
                               const std::vector<std::string>& info_lines,
-                              float progress_ratio);
+                              float progress_ratio) override;
     
     // Convert screen coordinates to OpenGL coordinates
-    Vec2 ScreenToGL(const Vec2& screen_pos) const;
-    Vec2 GLToScreen(const Vec2& gl_pos) const;
+    Vec2 ScreenToGL(const Vec2& screen_pos) const override;
+    Vec2 GLToScreen(const Vec2& gl_pos) const override;
     
     // Draw call statistics
-    void ResetDrawCallCount();
-    unsigned int GetDrawCallCount() const;
+    void ResetDrawCallCount() override;
+    unsigned int GetDrawCallCount() const override;
+
+    const char* GetName() const override { return "OpenGL"; }
 
 private:
     int window_width_;

@@ -9,11 +9,15 @@
 #include <queue>
 #include "midi_parser.h"
 #include "piano_keyboard.h"
-#include "opengl_renderer.h"
+#include "renderer.h"
+
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
 
 // Forward declarations
 class PianoKeyboard;
-class OpenGLRenderer;
+class RendererBackend;
 
 // MIDIチャンネル用カラーパレット (16チャンネル分)
 namespace MidiChannelColors {
@@ -150,7 +154,7 @@ public:
     ~MidiVideoOutput();
 
     // 初期化
-    bool Initialize(PianoKeyboard* piano_keyboard, OpenGLRenderer* renderer);
+    bool Initialize(PianoKeyboard* piano_keyboard, RendererBackend* renderer);
     void Cleanup();
 
     // MIDIファイル操作
@@ -245,7 +249,7 @@ private:
     
     // 外部参照
     PianoKeyboard* piano_keyboard_;
-    OpenGLRenderer* renderer_;
+    RendererBackend* renderer_;
     
     // アクティブノート管理
     std::vector<bool> active_notes_; // 128要素、各MIDIノートの状態

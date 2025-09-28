@@ -4,6 +4,10 @@
 #include <iostream>
 #include <imgui.h>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 // Piano keyboard range: Full MIDI range (MIDI notes 0-127, 128 keys total)
 constexpr int PIANO_START_NOTE = 0;    // C-1 (lowest MIDI note)
 constexpr int PIANO_END_NOTE = 127;    // G9 (highest MIDI note)
@@ -86,7 +90,7 @@ void PianoKeyboard::Update() {
     UpdateKeyAnimations();
 }
 
-void PianoKeyboard::Render(OpenGLRenderer& renderer) {
+void PianoKeyboard::Render(RendererBackend& renderer) {
     // Layer 1: Render white keys (background)
     RenderWhiteKeys(renderer);
 
@@ -172,8 +176,11 @@ void PianoKeyboard::SetKeyboardMargin(float margin) {
 }
 
 int PianoKeyboard::GetPressedKeyCount() const {
-    return std::count_if(keys_.begin(), keys_.end(), 
-                        [](const PianoKey& key) { return key.is_pressed; });
+    const auto pressed_count = std::count_if(
+        keys_.begin(), keys_.end(),
+        [](const PianoKey& key) { return key.is_pressed; });
+
+    return static_cast<int>(pressed_count);
 }
 
 std::vector<int> PianoKeyboard::GetPressedKeys() const {
@@ -238,7 +245,7 @@ void PianoKeyboard::CalculateKeyPositions() {
     }
 }
 
-void PianoKeyboard::RenderWhiteKeys(OpenGLRenderer& renderer) {
+void PianoKeyboard::RenderWhiteKeys(RendererBackend& renderer) {
     static bool debug_printed = false;
     static int keys_rendered = 0;
     
@@ -287,7 +294,7 @@ void PianoKeyboard::RenderWhiteKeys(OpenGLRenderer& renderer) {
     }
 }
 
-void PianoKeyboard::RenderBlackKeys(OpenGLRenderer& renderer) {
+void PianoKeyboard::RenderBlackKeys(RendererBackend& renderer) {
     for (const auto& key : keys_) {
         if (key.is_black) {
             // Calculate animated position and size
@@ -492,7 +499,7 @@ void PianoKeyboard::UpdateBlips() {
     }
 }
 
-void PianoKeyboard::RenderWhiteKeyBlips(OpenGLRenderer& renderer) {
+void PianoKeyboard::RenderWhiteKeyBlips(RendererBackend& renderer) {
     auto now = std::chrono::steady_clock::now();
 
     for (const auto& key : keys_) {
@@ -563,7 +570,7 @@ void PianoKeyboard::RenderWhiteKeyBlips(OpenGLRenderer& renderer) {
     }
 }
 
-void PianoKeyboard::RenderBlackKeyBlips(OpenGLRenderer& renderer) {
+void PianoKeyboard::RenderBlackKeyBlips(RendererBackend& renderer) {
     auto now = std::chrono::steady_clock::now();
 
     for (const auto& key : keys_) {

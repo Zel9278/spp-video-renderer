@@ -1,3 +1,19 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#ifdef DrawText
+#undef DrawText
+#endif
+#ifdef GetCurrentTime
+#undef GetCurrentTime
+#endif
+#endif
+
 #include <glad/glad.h>
 #ifndef GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_NONE
@@ -17,7 +33,14 @@
 #include <cstdlib>
 #include <cstddef>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 #include "opengl_renderer.h"
+#ifdef _WIN32
+#include "directx12_renderer.h"
+#endif
 #include "piano_keyboard.h"
 #include "midi_video_output.h"
 
@@ -34,6 +57,11 @@ constexpr int DEFAULT_VIDEO_HEIGHT = 1080;
 constexpr int PREVIEW_WIDTH = 1280;
 constexpr int PREVIEW_HEIGHT = 720;
 constexpr const char* WINDOW_TITLE = "OpenGL Piano Keyboard";
+
+enum class RendererType {
+    OpenGL,
+    DirectX12
+};
 
 static void SetFallbackWindowIcon(GLFWwindow* window) {
     // Create a simple 32x32 piano-themed icon
@@ -111,7 +139,11 @@ static const char* ColorModeToString(VideoOutputSettings::ColorMode mode) {
 }
 
 // Global variables
-std::unique_ptr<OpenGLRenderer> g_renderer;
+std::unique_ptr<RendererBackend> g_renderer;
+OpenGLRenderer* g_opengl_renderer = nullptr;
+#ifdef _WIN32
+DirectX12Renderer* g_directx_renderer = nullptr;
+#endif
 std::unique_ptr<PianoKeyboard> g_piano_keyboard;
 std::unique_ptr<MidiVideoOutput> g_midi_video_output;
 
@@ -210,6 +242,7 @@ struct CommandLineOptions {
     VideoOutputSettings::ColorMode color_mode = VideoOutputSettings::ColorMode::Channel;
     std::string ffmpeg_path;  // Custom FFmpeg executable path
     std::string output_directory;  // Custom output directory
+    std::string renderer = "opengl"; // Rendering backend: opengl or dx12 (Windows only)
 };
 
 // Parse command line arguments
@@ -231,6 +264,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
         std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
         std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
+        std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default) or dx12 (Windows)" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -374,6 +408,14 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                     std::cerr << "Error: " << arg << " requires a path" << std::endl;
                     exit(-1);
                 }
+            } else if (arg == "--renderer" || arg == "-rdr") {
+                if (i + 1 < argc) {
+                    options.renderer = argv[i + 1];
+                    i++;
+                } else {
+                    std::cerr << "Error: " << arg << " requires a value (opengl or dx12)" << std::endl;
+                    exit(-1);
+                }
             } else if (arg == "--help" || arg == "-h") {
                 // Show help and exit
                 std::cerr << "Usage: " << argv[0] << " [options] <midi_file>" << std::endl;
@@ -390,6 +432,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
                 std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
                 std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
+                std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default) or dx12 (Windows)" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -423,6 +466,24 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     CommandLineOptions options = ParseCommandLineArguments(argc, argv);
+
+    std::string renderer_lower;
+    renderer_lower.reserve(options.renderer.size());
+    for (char ch : options.renderer) {
+        renderer_lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+    }
+
+    RendererType renderer_type = RendererType::OpenGL;
+    if (renderer_lower == "dx12" || renderer_lower == "directx" || renderer_lower == "directx12") {
+#ifdef _WIN32
+        renderer_type = RendererType::DirectX12;
+#else
+        std::cerr << "Error: DirectX 12 renderer is only available on Windows." << std::endl;
+        return -1;
+#endif
+    } else if (!renderer_lower.empty() && renderer_lower != "opengl") {
+        std::cerr << "Warning: Unknown renderer '" << options.renderer << "'. Falling back to OpenGL." << std::endl;
+    }
     
     std::cout << "Loading MIDI file: " << options.midi_file << std::endl;
     std::cout << "Video codec: " << options.video_codec << std::endl;
@@ -463,86 +524,116 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    // Configure GLFW for headless rendering (final version)
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE); // Use compatibility profile for immediate mode
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE); // Hide window for headless rendering
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE); // Don't focus window
-    glfwWindowHint(GLFW_DECORATED, GLFW_FALSE); // Remove window decorations
-    glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_FALSE); // Disable double buffering for headless
-
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
-
-    // Create a hidden window for headless rendering (size must match video output)
     const int video_width = options.video_width;
     const int video_height = options.video_height;
 
-    GLFWwindow* window = glfwCreateWindow(video_width, video_height, "Piano Keyboard Video Renderer (Headless)", nullptr, nullptr);
-    if (!window) {
-        std::cerr << "Failed to create GLFW window" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    
-    // Set window icon
-    SetWindowIcon(window);
-
+    GLFWwindow* window = nullptr;
     GLFWwindow* preview_window = nullptr;
-
-    // Make the window's context current
-    glfwMakeContextCurrent(window);
-
-    // Initialize GLAD
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
-        std::cerr << "Failed to initialize GLAD" << std::endl;
-        glfwDestroyWindow(window);
-        glfwTerminate();
-        return -1;
-    }
-    
-    std::cout << "OpenGL initialized successfully!" << std::endl;
-    std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
-
-    if (options.show_preview) {
-        // Create a visible preview window that shares the OpenGL context
+    g_opengl_renderer = nullptr;
+#ifdef _WIN32
+    g_directx_renderer = nullptr;
+#endif
+    if (renderer_type == RendererType::OpenGL) {
         glfwDefaultWindowHints();
+        // Configure GLFW for hidden OpenGL context
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
         glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
-        glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
-        glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+        glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_FALSE);
 
-        preview_window = glfwCreateWindow(PREVIEW_WIDTH, PREVIEW_HEIGHT, "Rendering Preview", nullptr, window);
-        if (preview_window) {
-            SetWindowIcon(preview_window);
-            glfwMakeContextCurrent(preview_window);
-            gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
-            glfwSwapInterval(1);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            glfwSwapBuffers(preview_window);
-            std::cout << "Preview window created successfully." << std::endl;
-        } else {
-            std::cerr << "Warning: Failed to create preview window." << std::endl;
+#ifdef __APPLE__
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+#endif
+
+        window = glfwCreateWindow(video_width, video_height, "Piano Keyboard Video Renderer (OpenGL)", nullptr, nullptr);
+        if (!window) {
+            std::cerr << "Failed to create GLFW window" << std::endl;
+            glfwTerminate();
+            return -1;
         }
+
+        SetWindowIcon(window);
+        glfwMakeContextCurrent(window);
+
+        if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+            std::cerr << "Failed to initialize GLAD" << std::endl;
+            glfwDestroyWindow(window);
+            glfwTerminate();
+            return -1;
+        }
+
+        std::cout << "OpenGL initialized successfully!" << std::endl;
+        std::cout << "OpenGL Version: " << glGetString(GL_VERSION) << std::endl;
+
+        if (options.show_preview) {
+            glfwDefaultWindowHints();
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+            glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+            glfwWindowHint(GLFW_RESIZABLE, GLFW_TRUE);
+            glfwWindowHint(GLFW_DOUBLEBUFFER, GLFW_TRUE);
+
+            preview_window = glfwCreateWindow(PREVIEW_WIDTH, PREVIEW_HEIGHT, "Rendering Preview", nullptr, window);
+            if (preview_window) {
+                SetWindowIcon(preview_window);
+                glfwMakeContextCurrent(preview_window);
+                gladLoadGLLoader((GLADloadproc)glfwGetProcAddress);
+                glfwSwapInterval(1);
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                glfwSwapBuffers(preview_window);
+                std::cout << "Preview window created successfully." << std::endl;
+            } else {
+                std::cerr << "Warning: Failed to create preview window." << std::endl;
+            }
+        }
+
+        glfwMakeContextCurrent(window);
+        glfwSwapInterval(0);
+
+        std::cout << "Initializing OpenGL renderer..." << std::endl;
+        auto opengl_renderer = std::make_unique<OpenGLRenderer>();
+        g_opengl_renderer = opengl_renderer.get();
+        opengl_renderer->Initialize(video_width, video_height);
+        g_renderer = std::move(opengl_renderer);
+        std::cout << "OpenGL renderer initialized successfully!" << std::endl;
+    } else {
+#ifdef _WIN32
+        glfwDefaultWindowHints();
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+
+        window = glfwCreateWindow(video_width, video_height, "Piano Keyboard Video Renderer (DirectX 12)", nullptr, nullptr);
+        if (!window) {
+            std::cerr << "Failed to create headless window for DirectX renderer" << std::endl;
+            glfwTerminate();
+            return -1;
+        }
+
+        SetWindowIcon(window);
+
+        if (options.show_preview) {
+            std::cout << "Preview window is currently unavailable for the DirectX 12 backend. Rendering will continue headless." << std::endl;
+        }
+
+        std::cout << "Initializing DirectX 12 renderer..." << std::endl;
+        auto dx_renderer = std::make_unique<DirectX12Renderer>();
+        g_directx_renderer = dx_renderer.get();
+        dx_renderer->Initialize(video_width, video_height);
+        g_renderer = std::move(dx_renderer);
+        std::cout << "DirectX 12 renderer initialized successfully!" << std::endl;
+#else
+        (void)window;
+#endif
     }
-
-    // Return to the headless window context for rendering
-    glfwMakeContextCurrent(window);
-
-    // Disable V-Sync for headless rendering (not needed)
-    glfwSwapInterval(0);
-
-    // Initialize OpenGL renderer
-    std::cout << "Initializing OpenGL renderer..." << std::endl;
-    g_renderer = std::make_unique<OpenGLRenderer>();
-    g_renderer->Initialize(video_width, video_height);
-    std::cout << "OpenGL renderer initialized successfully!" << std::endl;
 
     // Initialize piano keyboard
     std::cout << "Initializing piano keyboard..." << std::endl;
@@ -568,8 +659,9 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    const char* renderer_label = (renderer_type == RendererType::OpenGL) ? "OpenGL" : "DirectX 12";
     std::cout << "MIDI file loaded successfully!" << std::endl;
-    std::cout << "OpenGL Piano Keyboard with MIDI Video Output initialized successfully!" << std::endl;
+    std::cout << renderer_label << " Piano Keyboard with MIDI Video Output initialized successfully!" << std::endl;
     std::cout << "Starting automatic video rendering..." << std::endl;
 
     // Configure video settings for high quality output
@@ -672,23 +764,25 @@ int main(int argc, char* argv[]) {
             break;
         }
 
-    // Render to offscreen framebuffer for video output
-    g_renderer->ResetDrawCallCount();
+        // Render to offscreen framebuffer for video output
+        g_renderer->ResetDrawCallCount();
         g_renderer->BindOffscreenFramebuffer(); // ビデオ解像度のオフスクリーンFBOにバインド
         g_renderer->Clear(Color(0.1f, 0.1f, 0.1f, 1.0f)); // Dark gray background
         g_piano_keyboard->Render(*g_renderer);
-        
+
         // デバッグ情報を描画 (デバッグモードが有効な場合)
         g_midi_video_output->RenderDebugOverlay();
-        
-        // Ensure all OpenGL commands are executed before frame capture
-        glFlush();
-        glFinish();
-        
+
+        if (g_opengl_renderer) {
+            // Ensure all OpenGL commands are executed before frame capture
+            glFlush();
+            glFinish();
+        }
+
         // フレームバッファのバインドを解除（デフォルトフレームバッファに戻す）
         g_renderer->UnbindOffscreenFramebuffer();
 
-        if (preview_window) {
+        if (preview_window && g_opengl_renderer) {
             glfwMakeContextCurrent(preview_window);
             int preview_fb_width = PREVIEW_WIDTH;
             int preview_fb_height = PREVIEW_HEIGHT;

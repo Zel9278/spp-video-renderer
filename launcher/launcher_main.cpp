@@ -117,12 +117,18 @@ enum class JobStatus {
 };
 
 struct RenderOptions {
+    enum class RendererBackend {
+        OpenGL = 0,
+        DirectX12 = 1
+    };
+
     enum class ColorMode {
         Channel = 0,
         Track = 1,
         Both = 2
     };
 
+    RendererBackend renderer_backend = RendererBackend::OpenGL;
     int video_width = 1920;
     int video_height = 1080;
     bool show_preview = false;
@@ -572,9 +578,24 @@ const char* color_mode_to_string(RenderOptions::ColorMode mode) {
     return "channel";
 }
 
+const char* renderer_backend_to_string(RenderOptions::RendererBackend backend) {
+    switch (backend) {
+        case RenderOptions::RendererBackend::OpenGL:
+            return "opengl";
+        case RenderOptions::RendererBackend::DirectX12:
+            return "dx12";
+    }
+    return "opengl";
+}
+
 #ifdef _WIN32
 std::wstring color_mode_to_wstring(RenderOptions::ColorMode mode) {
     const char* value = color_mode_to_string(mode);
+    return std::wstring(value, value + std::strlen(value));
+}
+
+std::wstring renderer_backend_to_wstring(RenderOptions::RendererBackend backend) {
+    const char* value = renderer_backend_to_string(backend);
     return std::wstring(value, value + std::strlen(value));
 }
 #endif
@@ -592,6 +613,7 @@ std::string build_command_line(const std::filesystem::path& renderer,
     cmd << " --bitrate " << quote_argument(std::to_string(opts.video_bitrate));
     cmd << (opts.use_cbr ? " --cbr" : " --vbr");
     cmd << " --color-mode " << quote_argument(color_mode_to_string(opts.color_mode));
+    cmd << " --renderer " << quote_argument(renderer_backend_to_string(opts.renderer_backend));
 
     if (opts.debug_overlay) {
         cmd << " --debug";
@@ -634,6 +656,7 @@ std::wstring build_command_line_w(const std::filesystem::path& renderer,
     cmd << L" --bitrate " << quote_argument(bitrate);
     cmd << (opts.use_cbr ? L" --cbr" : L" --vbr");
     cmd << L" --color-mode " << quote_argument(color_mode_to_wstring(opts.color_mode));
+    cmd << L" --renderer " << quote_argument(renderer_backend_to_wstring(opts.renderer_backend));
 
     if (opts.debug_overlay) {
         cmd << L" --debug";
@@ -1106,6 +1129,28 @@ int main(int argc, char* argv[]) {
 
         // Video Settings Section
         if (ImGui::CollapsingHeader("Video Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const char* renderer_items[] = {
+                "OpenGL"
+#ifdef _WIN32
+                , "DirectX 12"
+#endif
+            };
+            int renderer_count = static_cast<int>(IM_ARRAYSIZE(renderer_items));
+            int renderer_index = static_cast<int>(options.renderer_backend);
+            if (renderer_index < 0 || renderer_index >= renderer_count) {
+                renderer_index = 0;
+            }
+            if (ImGui::Combo("Renderer backend", &renderer_index, renderer_items, renderer_count)) {
+#ifdef _WIN32
+                options.renderer_backend = static_cast<RenderOptions::RendererBackend>(renderer_index);
+#else
+                options.renderer_backend = RenderOptions::RendererBackend::OpenGL;
+#endif
+            }
+#ifndef _WIN32
+            options.renderer_backend = RenderOptions::RendererBackend::OpenGL;
+#endif
+
             if (ImGui::Combo("Video codec", &codec_index, [](void* data, int idx, const char** out_text) {
                     const auto& vec = *static_cast<const std::vector<std::string>*>(data);
                     if (idx < 0 || idx >= static_cast<int>(vec.size())) {
@@ -1145,7 +1190,18 @@ int main(int argc, char* argv[]) {
         // Debug & Preview Section
         if (ImGui::CollapsingHeader("Debug & Preview", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::Checkbox("Debug overlay", &options.debug_overlay);
+            bool preview_supported = (options.renderer_backend == RenderOptions::RendererBackend::OpenGL);
+            if (!preview_supported && options.show_preview) {
+                options.show_preview = false;
+            }
+            if (!preview_supported) {
+                ImGui::BeginDisabled();
+            }
             ImGui::Checkbox("Show preview window", &options.show_preview);
+            if (!preview_supported) {
+                ImGui::EndDisabled();
+                ImGui::TextWrapped("Preview window is only available when using the OpenGL renderer.");
+            }
         }
 
         ImGui::Separator();

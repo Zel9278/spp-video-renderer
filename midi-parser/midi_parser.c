@@ -4,6 +4,10 @@
 #include <string.h>
 #include <errno.h>
 
+#if defined(_MSC_VER)
+#pragma execution_character_set("utf-8")
+#endif
+
 // バイトスワップ関数（ビッグエンディアン → リトルエンディアン）
 uint16_t midi_swap_uint16(uint16_t val) {
     return (val << 8) | (val >> 8);
