@@ -199,7 +199,7 @@ target("midi_parser")
     add_includedirs("midi-parser")
     
     -- Output directory
-    set_targetdir("$(builddir)/lib")
+    set_targetdir("$(projectdir)/build/lib")
     
     -- Compiler flags
     if is_plat("windows") then
@@ -242,7 +242,7 @@ target("midi_example")
     add_includedirs("midi-parser")
     
     -- Output directory
-    set_targetdir("$(builddir)/bin")
+    set_targetdir("$(projectdir)/build/bin")
     
     -- Compiler flags
     if is_plat("windows") then
