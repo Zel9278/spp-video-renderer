@@ -6,8 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -326,6 +328,30 @@ void VulkanRenderer::CleanupVulkan() {
     DestroyPipelines();
     ReleaseFramebufferResources();
 
+    auto destroy_buffer = [&](VulkanBuffer& buffer) {
+        if (buffer.buffer != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, buffer.buffer, nullptr);
+            buffer.buffer = VK_NULL_HANDLE;
+        }
+        if (buffer.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, buffer.memory, nullptr);
+            buffer.memory = VK_NULL_HANDLE;
+        }
+        buffer.size = 0;
+    };
+
+    destroy_buffer(shape_vertex_buffer_.device);
+    destroy_buffer(shape_vertex_buffer_.staging);
+    shape_vertex_buffer_.pending_copy_size = 0;
+
+    destroy_buffer(text_vertex_buffer_.device);
+    destroy_buffer(text_vertex_buffer_.staging);
+    text_vertex_buffer_.pending_copy_size = 0;
+
+    if (readback_mapped_ptr_) {
+        vkUnmapMemory(device_, readback_buffer_.memory);
+        readback_mapped_ptr_ = nullptr;
+    }
     if (readback_buffer_.buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device_, readback_buffer_.buffer, nullptr);
         vkFreeMemory(device_, readback_buffer_.memory, nullptr);
@@ -722,7 +748,8 @@ void VulkanRenderer::EnsureFontResources(float font_size) {
 
     VulkanBuffer staging;
     VkDeviceSize image_size = static_cast<VkDeviceSize>(atlas.size());
-    EnsureBufferCapacity(staging, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    EnsureBufferCapacity(staging, image_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 
     void* mapped = nullptr;
     VK_CHECK(vkMapMemory(device_, staging.memory, 0, image_size, 0, &mapped));
@@ -809,8 +836,10 @@ void VulkanRenderer::EnsureFontResources(float font_size) {
     write.pImageInfo = &image_desc;
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
+    constexpr float kReferenceFontSize = 16.0f;
     requested_font_size_ = font_size;
-    font_pixel_scale_ = font_size / static_cast<float>(simple_font::kGlyphHeight);
+    float clamped_font_size = std::max(font_size, 1.0f);
+    font_pixel_scale_ = clamped_font_size / kReferenceFontSize;
     font_uploaded_ = true;
 
     vkDestroyBuffer(device_, staging.buffer, nullptr);
@@ -991,7 +1020,8 @@ void VulkanRenderer::DrawText(const std::string& text, const Vec2& position, con
 
     std::lock_guard<std::mutex> lock(render_mutex_);
     if (!font_loaded_) {
-        LoadFont(requested_font_size_);
+        EnsureFontResources(requested_font_size_);
+        font_loaded_ = true;
     }
 
     float effective_scale = font_pixel_scale_ * scale;
@@ -1106,6 +1136,7 @@ void VulkanRenderer::Flush() {
         return;
     }
 
+    auto frame_start = std::chrono::steady_clock::now();
     shape_vertices_.clear();
     text_vertices_.clear();
 
@@ -1194,13 +1225,45 @@ void VulkanRenderer::Flush() {
         append_text_quad(command);
     }
 
+    auto upload_start = std::chrono::steady_clock::now();
     UploadShapeVertices(shape_vertices_);
     UploadTextVertices(text_vertices_);
+    auto upload_end = std::chrono::steady_clock::now();
 
-    RecordCommandBuffer();
+    VkDeviceSize required_size = static_cast<VkDeviceSize>(framebuffer_width_) * framebuffer_height_ * 4u;
+    EnsureReadbackBuffer(required_size);
+
+    auto record_start = std::chrono::steady_clock::now();
+    RecordCommandBuffer(required_size);
+    auto record_end = std::chrono::steady_clock::now();
+
+    auto wait_start = std::chrono::steady_clock::now();
     SubmitAndWait();
-    CopyImageToReadbackBuffer();
-    readback_pending_ = true;
+    auto wait_end = std::chrono::steady_clock::now();
+
+    auto readback_start = std::chrono::steady_clock::now();
+    ProcessReadbackData(required_size);
+    auto readback_end = std::chrono::steady_clock::now();
+
+    last_frame_timings_.vertex_upload_ms = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
+    last_frame_timings_.command_record_ms = std::chrono::duration<double, std::milli>(record_end - record_start).count();
+    last_frame_timings_.gpu_wait_ms = std::chrono::duration<double, std::milli>(wait_end - wait_start).count();
+    last_frame_timings_.readback_ms = std::chrono::duration<double, std::milli>(readback_end - readback_start).count();
+    last_frame_timings_.total_ms = std::chrono::duration<double, std::milli>(readback_end - frame_start).count();
+
+    if (last_frame_timings_.total_ms > 16.67) {
+        auto now = std::chrono::steady_clock::now();
+        if (last_slow_log_.time_since_epoch().count() == 0 ||
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - last_slow_log_).count() > 1000) {
+            std::cout << "[VulkanRenderer] Slow frame detected: total " << last_frame_timings_.total_ms
+                      << " ms (upload " << last_frame_timings_.vertex_upload_ms
+                      << " ms, record " << last_frame_timings_.command_record_ms
+                      << " ms, wait " << last_frame_timings_.gpu_wait_ms
+                      << " ms, readback " << last_frame_timings_.readback_ms << " ms)" << std::endl;
+            last_slow_log_ = now;
+        }
+    }
+
     frame_dirty_ = false;
     has_pending_clear_ = false;
 }
@@ -1209,15 +1272,102 @@ bool VulkanRenderer::HasRenderableContent() const {
     return has_pending_clear_ || !shape_commands_.empty() || !text_commands_.empty();
 }
 
-void VulkanRenderer::RecordCommandBuffer() {
-    if (color_image_layout_ != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        TransitionImageLayout(color_image_, color_image_layout_, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-        color_image_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-
+void VulkanRenderer::RecordCommandBuffer(VkDeviceSize readback_size) {
     vkResetCommandBuffer(command_buffer_, 0);
     VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     VK_CHECK(vkBeginCommandBuffer(command_buffer_, &begin_info));
+
+    if (color_image_layout_ != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        VkImageMemoryBarrier to_color{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        to_color.oldLayout = color_image_layout_;
+        to_color.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        to_color.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_color.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        to_color.image = color_image_;
+        to_color.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        to_color.subresourceRange.levelCount = 1;
+        to_color.subresourceRange.layerCount = 1;
+
+        VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (color_image_layout_ == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+            to_color.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        }
+        to_color.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(command_buffer_, src_stage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &to_color);
+        color_image_layout_ = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
+    std::array<VkBufferMemoryBarrier, 2> host_to_transfer{};
+    uint32_t host_barrier_count = 0;
+    if (shape_vertex_buffer_.pending_copy_size > 0) {
+        host_to_transfer[host_barrier_count] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        host_to_transfer[host_barrier_count].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        host_to_transfer[host_barrier_count].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        host_to_transfer[host_barrier_count].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        host_to_transfer[host_barrier_count].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        host_to_transfer[host_barrier_count].buffer = shape_vertex_buffer_.staging.buffer;
+        host_to_transfer[host_barrier_count].offset = 0;
+        host_to_transfer[host_barrier_count].size = shape_vertex_buffer_.pending_copy_size;
+        ++host_barrier_count;
+    }
+    if (text_vertex_buffer_.pending_copy_size > 0) {
+        host_to_transfer[host_barrier_count] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        host_to_transfer[host_barrier_count].srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        host_to_transfer[host_barrier_count].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        host_to_transfer[host_barrier_count].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        host_to_transfer[host_barrier_count].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        host_to_transfer[host_barrier_count].buffer = text_vertex_buffer_.staging.buffer;
+        host_to_transfer[host_barrier_count].offset = 0;
+        host_to_transfer[host_barrier_count].size = text_vertex_buffer_.pending_copy_size;
+        ++host_barrier_count;
+    }
+    if (host_barrier_count > 0) {
+        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, host_barrier_count, host_to_transfer.data(), 0, nullptr);
+    }
+
+    if (shape_vertex_buffer_.pending_copy_size > 0) {
+        VkBufferCopy copy{0, 0, shape_vertex_buffer_.pending_copy_size};
+        vkCmdCopyBuffer(command_buffer_, shape_vertex_buffer_.staging.buffer, shape_vertex_buffer_.device.buffer, 1, &copy);
+    }
+    if (text_vertex_buffer_.pending_copy_size > 0) {
+        VkBufferCopy copy{0, 0, text_vertex_buffer_.pending_copy_size};
+        vkCmdCopyBuffer(command_buffer_, text_vertex_buffer_.staging.buffer, text_vertex_buffer_.device.buffer, 1, &copy);
+    }
+
+    std::array<VkBufferMemoryBarrier, 2> transfer_to_vertex{};
+    uint32_t transfer_barrier_count = 0;
+    if (shape_vertex_buffer_.pending_copy_size > 0) {
+        transfer_to_vertex[transfer_barrier_count] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        transfer_to_vertex[transfer_barrier_count].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        transfer_to_vertex[transfer_barrier_count].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+        transfer_to_vertex[transfer_barrier_count].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_to_vertex[transfer_barrier_count].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_to_vertex[transfer_barrier_count].buffer = shape_vertex_buffer_.device.buffer;
+        transfer_to_vertex[transfer_barrier_count].offset = 0;
+        transfer_to_vertex[transfer_barrier_count].size = shape_vertex_buffer_.pending_copy_size;
+        ++transfer_barrier_count;
+    }
+    if (text_vertex_buffer_.pending_copy_size > 0) {
+        transfer_to_vertex[transfer_barrier_count] = {VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        transfer_to_vertex[transfer_barrier_count].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        transfer_to_vertex[transfer_barrier_count].dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+        transfer_to_vertex[transfer_barrier_count].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_to_vertex[transfer_barrier_count].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        transfer_to_vertex[transfer_barrier_count].buffer = text_vertex_buffer_.device.buffer;
+        transfer_to_vertex[transfer_barrier_count].offset = 0;
+        transfer_to_vertex[transfer_barrier_count].size = text_vertex_buffer_.pending_copy_size;
+        ++transfer_barrier_count;
+    }
+    if (transfer_barrier_count > 0) {
+        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                             0, 0, nullptr, transfer_barrier_count, transfer_to_vertex.data(), 0, nullptr);
+    }
+
+    shape_vertex_buffer_.pending_copy_size = 0;
+    text_vertex_buffer_.pending_copy_size = 0;
 
     VkClearValue clear_value{};
     clear_value.color.float32[0] = clear_color_.r;
@@ -1247,9 +1397,9 @@ void VulkanRenderer::RecordCommandBuffer() {
     vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
 
     if (!shape_vertices_.empty()) {
-        VkDeviceSize offset = 0;
-        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, shape_pipeline_);
-        vkCmdBindVertexBuffers(command_buffer_, 0, 1, &shape_vertex_buffer_.buffer, &offset);
+    VkDeviceSize offset = 0;
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, shape_pipeline_);
+    vkCmdBindVertexBuffers(command_buffer_, 0, 1, &shape_vertex_buffer_.device.buffer, &offset);
 
         std::size_t vertex_index = 0;
         for (const auto& command : shape_commands_) {
@@ -1268,31 +1418,53 @@ void VulkanRenderer::RecordCommandBuffer() {
     }
 
     if (font_uploaded_ && !text_vertices_.empty()) {
-        VkDeviceSize offset = 0;
-        vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
+    VkDeviceSize offset = 0;
+    vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_);
         vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, text_pipeline_layout_,
-                                0, 1, &text_descriptor_set_, 0, nullptr);
-        vkCmdBindVertexBuffers(command_buffer_, 0, 1, &text_vertex_buffer_.buffer, &offset);
+                0, 1, &text_descriptor_set_, 0, nullptr);
+    vkCmdBindVertexBuffers(command_buffer_, 0, 1, &text_vertex_buffer_.device.buffer, &offset);
         vkCmdDraw(command_buffer_, static_cast<uint32_t>(text_vertices_.size()), 1, 0, 0);
     }
 
     vkCmdEndRenderPass(command_buffer_);
 
-    VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = color_image_;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkImageMemoryBarrier to_transfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    to_transfer.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.image = color_image_;
+    to_transfer.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    to_transfer.subresourceRange.levelCount = 1;
+    to_transfer.subresourceRange.layerCount = 1;
+    to_transfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
     vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+                         0, 0, nullptr, 0, nullptr, 1, &to_transfer);
     color_image_layout_ = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+
+    VkBufferImageCopy copy_region{};
+    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    copy_region.imageSubresource.layerCount = 1;
+    copy_region.imageExtent = {static_cast<uint32_t>(framebuffer_width_), static_cast<uint32_t>(framebuffer_height_), 1};
+    copy_region.bufferRowLength = static_cast<uint32_t>(framebuffer_width_);
+    copy_region.bufferImageHeight = static_cast<uint32_t>(framebuffer_height_);
+
+    vkCmdCopyImageToBuffer(command_buffer_, color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           readback_buffer_.buffer, 1, &copy_region);
+
+    VkBufferMemoryBarrier buffer_barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+    buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    buffer_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.buffer = readback_buffer_.buffer;
+    buffer_barrier.offset = 0;
+    buffer_barrier.size = readback_size;
+
+    vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                         0, 0, nullptr, 1, &buffer_barrier, 0, nullptr);
 
     VK_CHECK(vkEndCommandBuffer(command_buffer_));
 }
@@ -1307,44 +1479,22 @@ void VulkanRenderer::SubmitAndWait() {
     VK_CHECK(vkWaitForFences(device_, 1, &render_fence_, VK_TRUE, UINT64_MAX));
 }
 
-void VulkanRenderer::CopyImageToReadbackBuffer() {
-    VkDeviceSize required_size = static_cast<VkDeviceSize>(framebuffer_width_) * framebuffer_height_ * 4u;
-    EnsureBufferCapacity(readback_buffer_, required_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
-
-    vkResetCommandBuffer(command_buffer_, 0);
-    VkCommandBufferBeginInfo begin_info{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(command_buffer_, &begin_info));
-
-    VkBufferImageCopy copy_region{};
-    copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy_region.imageSubresource.layerCount = 1;
-    copy_region.imageExtent = {static_cast<uint32_t>(framebuffer_width_), static_cast<uint32_t>(framebuffer_height_), 1};
-    copy_region.bufferRowLength = static_cast<uint32_t>(framebuffer_width_);
-    copy_region.bufferImageHeight = static_cast<uint32_t>(framebuffer_height_);
-
-    vkCmdCopyImageToBuffer(command_buffer_, color_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           readback_buffer_.buffer, 1, &copy_region);
-    VK_CHECK(vkEndCommandBuffer(command_buffer_));
-
-    SubmitAndWait();
-
-    void* data = nullptr;
-    VK_CHECK(vkMapMemory(device_, readback_buffer_.memory, 0, required_size, 0, &data));
+void VulkanRenderer::ProcessReadbackData(VkDeviceSize required_size) {
+    if (!readback_mapped_ptr_ || required_size == 0) {
+        return;
+    }
 
     const auto row_size = static_cast<std::size_t>(framebuffer_width_) * 4u;
     const auto height = static_cast<std::size_t>(framebuffer_height_);
-    const std::uint8_t* src_bytes = static_cast<std::uint8_t*>(data);
+    const auto max_rows = static_cast<std::size_t>(std::min<VkDeviceSize>(height, required_size / row_size));
+    const std::uint8_t* src_bytes = static_cast<std::uint8_t*>(readback_mapped_ptr_);
     std::uint8_t* dst_bytes = readback_cache_.data();
 
-    for (std::size_t y = 0; y < height; ++y) {
+    for (std::size_t y = 0; y < max_rows; ++y) {
         const std::size_t src_row = (height - 1 - y) * row_size;
         const std::size_t dst_row = y * row_size;
         std::memcpy(dst_bytes + dst_row, src_bytes + src_row, row_size);
     }
-
-    vkUnmapMemory(device_, readback_buffer_.memory);
-    readback_pending_ = false;
 }
 
 std::vector<std::uint8_t> VulkanRenderer::ReadFramebuffer(int width, int height) {
@@ -1366,16 +1516,12 @@ void VulkanRenderer::StartAsyncReadback(int width, int height) {
         return;
     }
     FlushIfNeeded();
-    readback_pending_ = true;
 }
 
 std::vector<std::uint8_t> VulkanRenderer::GetAsyncReadbackResult(int width, int height) {
     std::lock_guard<std::mutex> lock(render_mutex_);
     if (width != framebuffer_width_ || height != framebuffer_height_) {
         return {};
-    }
-    if (readback_pending_) {
-        CopyImageToReadbackBuffer();
     }
     return readback_cache_;
 }
@@ -1410,15 +1556,20 @@ unsigned int VulkanRenderer::GetDrawCallCount() const {
     return draw_call_count_;
 }
 
-void VulkanRenderer::EnsureBufferCapacity(VulkanBuffer& buffer, VkDeviceSize required_size, VkBufferUsageFlags usage) {
+bool VulkanRenderer::EnsureBufferCapacity(VulkanBuffer& buffer, VkDeviceSize required_size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkMemoryPropertyFlags* used_properties) {
     if (buffer.buffer != VK_NULL_HANDLE && buffer.size >= required_size) {
-        return;
+        if (used_properties) {
+            *used_properties = properties;
+        }
+        return false;
     }
 
     if (buffer.buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device_, buffer.buffer, nullptr);
         vkFreeMemory(device_, buffer.memory, nullptr);
-        buffer = {};
+        buffer.buffer = VK_NULL_HANDLE;
+        buffer.memory = VK_NULL_HANDLE;
+        buffer.size = 0;
     }
 
     VkBufferCreateInfo buffer_info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -1430,38 +1581,95 @@ void VulkanRenderer::EnsureBufferCapacity(VulkanBuffer& buffer, VkDeviceSize req
     VkMemoryRequirements mem_req;
     vkGetBufferMemoryRequirements(device_, buffer.buffer, &mem_req);
 
+    VkMemoryPropertyFlags selected_properties = properties;
+    uint32_t memory_type_index = 0;
+    try {
+        memory_type_index = FindMemoryType(mem_req.memoryTypeBits, selected_properties);
+    } catch (const std::runtime_error&) {
+        if ((selected_properties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0) {
+            VkMemoryPropertyFlags fallback = selected_properties & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+            memory_type_index = FindMemoryType(mem_req.memoryTypeBits, fallback);
+            selected_properties = fallback;
+        } else {
+            throw;
+        }
+    }
+
     VkMemoryAllocateInfo alloc_info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc_info.allocationSize = mem_req.size;
-    alloc_info.memoryTypeIndex = FindMemoryType(mem_req.memoryTypeBits,
-                                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    alloc_info.memoryTypeIndex = memory_type_index;
     VK_CHECK(vkAllocateMemory(device_, &alloc_info, nullptr, &buffer.memory));
     VK_CHECK(vkBindBufferMemory(device_, buffer.buffer, buffer.memory, 0));
 
     buffer.size = required_size;
+    if (used_properties) {
+        *used_properties = selected_properties;
+    }
+    return true;
+}
+
+void VulkanRenderer::EnsureReadbackBuffer(VkDeviceSize required_size) {
+    if (readback_buffer_.buffer != VK_NULL_HANDLE && readback_buffer_.size >= required_size) {
+        if (!readback_mapped_ptr_) {
+            VK_CHECK(vkMapMemory(device_, readback_buffer_.memory, 0, readback_buffer_.size, 0, &readback_mapped_ptr_));
+            readback_mapped_size_ = readback_buffer_.size;
+        }
+        return;
+    }
+
+    if (readback_mapped_ptr_) {
+        vkUnmapMemory(device_, readback_buffer_.memory);
+        readback_mapped_ptr_ = nullptr;
+        readback_mapped_size_ = 0;
+    }
+
+    VkMemoryPropertyFlags used_properties = 0;
+    EnsureBufferCapacity(readback_buffer_, required_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
+                         &used_properties);
+    readback_memory_properties_ = used_properties;
+
+    VK_CHECK(vkMapMemory(device_, readback_buffer_.memory, 0, readback_buffer_.size, 0, &readback_mapped_ptr_));
+    readback_mapped_size_ = readback_buffer_.size;
+}
+
+void VulkanRenderer::EnsureVertexBufferCapacity(VertexBufferSet& buffers, VkDeviceSize required_size, VkBufferUsageFlags usage) {
+    if (required_size == 0) {
+        return;
+    }
+
+    (void)EnsureBufferCapacity(buffers.device, required_size, usage | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    (void)EnsureBufferCapacity(buffers.staging, required_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
 }
 
 void VulkanRenderer::UploadShapeVertices(const std::vector<ShapeVertex>& vertices) {
     if (vertices.empty()) {
+        shape_vertex_buffer_.pending_copy_size = 0;
         return;
     }
     VkDeviceSize size = static_cast<VkDeviceSize>(vertices.size() * sizeof(ShapeVertex));
-    EnsureBufferCapacity(shape_vertex_buffer_, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    EnsureVertexBufferCapacity(shape_vertex_buffer_, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(device_, shape_vertex_buffer_.memory, 0, size, 0, &mapped));
+    VK_CHECK(vkMapMemory(device_, shape_vertex_buffer_.staging.memory, 0, size, 0, &mapped));
     std::memcpy(mapped, vertices.data(), vertices.size() * sizeof(ShapeVertex));
-    vkUnmapMemory(device_, shape_vertex_buffer_.memory);
+    vkUnmapMemory(device_, shape_vertex_buffer_.staging.memory);
+    shape_vertex_buffer_.pending_copy_size = size;
 }
 
 void VulkanRenderer::UploadTextVertices(const std::vector<TextVertex>& vertices) {
     if (vertices.empty()) {
+        text_vertex_buffer_.pending_copy_size = 0;
         return;
     }
     VkDeviceSize size = static_cast<VkDeviceSize>(vertices.size() * sizeof(TextVertex));
-    EnsureBufferCapacity(text_vertex_buffer_, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+    EnsureVertexBufferCapacity(text_vertex_buffer_, size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
     void* mapped = nullptr;
-    VK_CHECK(vkMapMemory(device_, text_vertex_buffer_.memory, 0, size, 0, &mapped));
+    VK_CHECK(vkMapMemory(device_, text_vertex_buffer_.staging.memory, 0, size, 0, &mapped));
     std::memcpy(mapped, vertices.data(), vertices.size() * sizeof(TextVertex));
-    vkUnmapMemory(device_, text_vertex_buffer_.memory);
+    vkUnmapMemory(device_, text_vertex_buffer_.staging.memory);
+    text_vertex_buffer_.pending_copy_size = size;
 }
 
 void VulkanRenderer::TransitionImageLayout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout) {
@@ -1528,6 +1736,15 @@ uint32_t VulkanRenderer::FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlag
     for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
         if ((type_bits & (1u << i)) && (memory_properties.memoryTypes[i].propertyFlags & properties) == properties) {
             return i;
+        }
+    }
+
+    if ((properties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) != 0) {
+        VkMemoryPropertyFlags fallback = properties & ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        for (uint32_t i = 0; i < memory_properties.memoryTypeCount; ++i) {
+            if ((type_bits & (1u << i)) && (memory_properties.memoryTypes[i].propertyFlags & fallback) == fallback) {
+                return i;
+            }
         }
     }
     throw std::runtime_error("Failed to find suitable Vulkan memory type");

@@ -13,7 +13,6 @@ Run the executable with `--help` (or `-h`) to see the full reference:
 MPP Video Renderer --help
 ```
 
-
 Common flags:
 - `--video-codec`, `-vc <codec>` – choose the FFmpeg encoder (e.g. `libx264`, `h264_nvenc`)
 - `--resolution`, `-r <width>x<height>` – output resolution (defaults to 1920x1080)

@@ -4,6 +4,7 @@
 
 #include <vulkan/vulkan.h>
 
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -123,6 +124,20 @@ private:
         VkDeviceSize size = 0;
     };
 
+    struct VertexBufferSet {
+        VulkanBuffer device;
+        VulkanBuffer staging;
+        VkDeviceSize pending_copy_size = 0;
+    };
+
+    struct FrameTimings {
+        double vertex_upload_ms = 0.0;
+        double command_record_ms = 0.0;
+        double gpu_wait_ms = 0.0;
+        double readback_ms = 0.0;
+        double total_ms = 0.0;
+    };
+
     struct GlyphInfo {
         float u0;
         float v0;
@@ -145,14 +160,15 @@ private:
 
     void FlushIfNeeded();
     void Flush();
-    void RecordCommandBuffer();
+    void RecordCommandBuffer(VkDeviceSize readback_size);
     void SubmitAndWait();
 
-    void EnsureBufferCapacity(VulkanBuffer& buffer, VkDeviceSize required_size, VkBufferUsageFlags usage);
+    bool EnsureBufferCapacity(VulkanBuffer& buffer, VkDeviceSize required_size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties, VkMemoryPropertyFlags* used_properties = nullptr);
+    void EnsureReadbackBuffer(VkDeviceSize required_size);
+    void EnsureVertexBufferCapacity(VertexBufferSet& buffers, VkDeviceSize required_size, VkBufferUsageFlags usage);
     void UploadShapeVertices(const std::vector<ShapeVertex>& vertices);
     void UploadTextVertices(const std::vector<TextVertex>& vertices);
-
-    void CopyImageToReadbackBuffer();
+    void ProcessReadbackData(VkDeviceSize required_size);
 
     void TransitionImageLayout(VkImage image, VkImageLayout old_layout, VkImageLayout new_layout);
     uint32_t FindMemoryType(uint32_t type_bits, VkMemoryPropertyFlags properties) const;
@@ -190,9 +206,12 @@ private:
     VkFormat color_format_ = VK_FORMAT_R8G8B8A8_UNORM;
     VkImageLayout color_image_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    VulkanBuffer shape_vertex_buffer_;
-    VulkanBuffer text_vertex_buffer_;
+    VertexBufferSet shape_vertex_buffer_;
+    VertexBufferSet text_vertex_buffer_;
     VulkanBuffer readback_buffer_;
+    void* readback_mapped_ptr_ = nullptr;
+    VkDeviceSize readback_mapped_size_ = 0;
+    VkMemoryPropertyFlags readback_memory_properties_ = 0;
 
     VkImage font_image_ = VK_NULL_HANDLE;
     VkDeviceMemory font_image_memory_ = VK_NULL_HANDLE;
@@ -226,7 +245,9 @@ private:
     unsigned int draw_call_count_ = 0;
 
     bool frame_dirty_ = false;
-    bool readback_pending_ = false;
+
+    FrameTimings last_frame_timings_{};
+    std::chrono::steady_clock::time_point last_slow_log_{};
 
     std::mutex render_mutex_;
 };
