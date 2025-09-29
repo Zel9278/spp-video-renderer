@@ -6,13 +6,15 @@ set_languages("cxx17")
 
 -- Set target platform and toolchain
 set_arch("x64")
+add_requires("vulkan-headers", "vulkan-loader")
+
 if is_plat("windows") then
     set_toolchains("msvc")
     -- Add packages for OpenGL and window management on Windows
-    add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb")
+    add_requires("glfw", "glad", "imgui[glfw_opengl3]", "stb", "shaderc")
 elseif is_plat("linux") then
     -- For NixOS: Only use packages that can't be provided by system
-    add_requires("glad", "imgui[glfw_opengl3]", "stb")
+    add_requires("glad", "imgui[glfw_opengl3]", "stb", "shaderc")
 end
 
 -- Define the target
@@ -22,7 +24,7 @@ target("MPP Video Renderer")
     add_rules("utils.bin2c", {extensions = {".ico", ".png"}})
 
     -- Add source files
-    add_files("main.cpp", "opengl_renderer.cpp", "directx12_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp", "resources/window_icon_loader.cpp")
+    add_files("main.cpp", "opengl_renderer.cpp", "directx12_renderer.cpp", "vulkan_renderer.cpp", "piano_keyboard.cpp", "midi_video_output.cpp", "resources/window_icon_loader.cpp")
     add_files("resources/icon.png")
 
     -- Add header files
@@ -46,29 +48,29 @@ target("MPP Video Renderer")
 
     -- System libraries for Windows
     if is_plat("windows") then
-    add_links("opengl32", "gdi32", "user32", "kernel32", "shell32", "d3d12", "dxgi", "d3dcompiler")
-    add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "comdlg32", "d3d12", "dxgi", "d3dcompiler")
+    add_links("opengl32", "gdi32", "user32", "kernel32", "shell32", "d3d12", "dxgi", "d3dcompiler", "vulkan-1")
+    add_syslinks("opengl32", "gdi32", "user32", "kernel32", "shell32", "comdlg32", "d3d12", "dxgi", "d3dcompiler", "vulkan-1")
     end
 
     -- Add packages
     if is_plat("windows") then
-        add_packages("glfw", "glad", "imgui", "stb")
+    add_packages("glfw", "glad", "imgui", "stb", "shaderc", "vulkan-headers", "vulkan-loader")
     elseif is_plat("linux") then
         -- Use system GLFW and system OpenGL
         if os.getenv("NIX_PROFILES") then
             -- NixOS: Use only essential packages, use system for rest
-            add_packages("glad", "stb")
+            add_packages("glad", "stb", "shaderc", "vulkan-headers")
         else
             -- Other Linux: Use xmake packages
-            add_packages("glad", "imgui", "stb")
+            add_packages("glad", "imgui", "stb", "shaderc", "vulkan-headers")
         end
         -- Link system GLFW directly
-        add_links("glfw")
+    add_links("glfw")
     end
 
     -- Platform specific libraries and settings
     if is_plat("linux") then
-        add_links("dl", "pthread", "m", "GL")
+    add_links("dl", "pthread", "m", "GL", "vulkan")
         -- System X11 libraries - these should be available on most Linux systems
         add_syslinks("X11", "Xcursor", "Xrandr", "Xinerama", "Xi", "Xext")
         

@@ -119,7 +119,8 @@ enum class JobStatus {
 struct RenderOptions {
     enum class RendererBackend {
         OpenGL = 0,
-        DirectX12 = 1
+        Vulkan = 1,
+        DirectX12 = 2
     };
 
     enum class ColorMode {
@@ -144,6 +145,7 @@ struct RenderOptions {
 
 constexpr std::size_t kPathBufferSize = 1024;
 constexpr std::size_t kMaxLogLines = 2000;
+constexpr std::size_t kCommandBufferSize = 2048;
 
 class ProcessRunner {
 public:
@@ -533,13 +535,12 @@ std::string format_duration(std::chrono::steady_clock::duration duration) {
 }
 
 std::string quote_argument(const std::string& value) {
-    if (value.find_first_of(" \"\t") == std::string::npos) {
-        return value;
-    }
     std::string quoted = "\"";
     for (char c : value) {
         if (c == '\"') {
             quoted += "\\\"";
+        } else if (c == '\\') {
+            quoted += "\\\\";
         } else {
             quoted += c;
         }
@@ -550,13 +551,12 @@ std::string quote_argument(const std::string& value) {
 
 #ifdef _WIN32
 std::wstring quote_argument(const std::wstring& value) {
-    if (value.find_first_of(L" \"\t") == std::wstring::npos) {
-        return value;
-    }
     std::wstring quoted = L"\"";
     for (wchar_t c : value) {
         if (c == L'\"') {
             quoted += L"\\\"";
+        } else if (c == L'\\') {
+            quoted += L"\\\\";
         } else {
             quoted += c;
         }
@@ -582,6 +582,8 @@ const char* renderer_backend_to_string(RenderOptions::RendererBackend backend) {
     switch (backend) {
         case RenderOptions::RendererBackend::OpenGL:
             return "opengl";
+        case RenderOptions::RendererBackend::Vulkan:
+            return "vulkan";
         case RenderOptions::RendererBackend::DirectX12:
             return "dx12";
     }
@@ -1027,6 +1029,7 @@ int main(int argc, char* argv[]) {
     std::array<char, kPathBufferSize> audio_path_buffer{};
     std::array<char, kPathBufferSize> ffmpeg_path_buffer{};
     std::array<char, kPathBufferSize> output_dir_buffer{};
+    std::array<char, kCommandBufferSize> command_buffer{};
 
     RenderOptions options;
 
@@ -1129,27 +1132,28 @@ int main(int argc, char* argv[]) {
 
         // Video Settings Section
         if (ImGui::CollapsingHeader("Video Settings", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const char* renderer_items[] = {
-                "OpenGL"
-#ifdef _WIN32
-                , "DirectX 12"
+#if defined(_WIN32)
+            const char* renderer_items[] = {"OpenGL", "Vulkan", "DirectX 12"};
+#else
+            const char* renderer_items[] = {"OpenGL", "Vulkan"};
 #endif
-            };
+#if !defined(_WIN32)
+            if (options.renderer_backend == RenderOptions::RendererBackend::DirectX12) {
+                options.renderer_backend = RenderOptions::RendererBackend::OpenGL;
+            }
+#endif
             int renderer_count = static_cast<int>(IM_ARRAYSIZE(renderer_items));
             int renderer_index = static_cast<int>(options.renderer_backend);
             if (renderer_index < 0 || renderer_index >= renderer_count) {
                 renderer_index = 0;
             }
             if (ImGui::Combo("Renderer backend", &renderer_index, renderer_items, renderer_count)) {
-#ifdef _WIN32
                 options.renderer_backend = static_cast<RenderOptions::RendererBackend>(renderer_index);
-#else
-                options.renderer_backend = RenderOptions::RendererBackend::OpenGL;
-#endif
             }
-#ifndef _WIN32
-            options.renderer_backend = RenderOptions::RendererBackend::OpenGL;
-#endif
+
+            if (static_cast<int>(options.renderer_backend) != renderer_index) {
+                options.renderer_backend = static_cast<RenderOptions::RendererBackend>(renderer_index);
+            }
 
             if (ImGui::Combo("Video codec", &codec_index, [](void* data, int idx, const char** out_text) {
                     const auto& vec = *static_cast<const std::vector<std::string>*>(data);
@@ -1213,10 +1217,58 @@ int main(int argc, char* argv[]) {
             options.include_audio = false;
         }
 
+        RenderOptions preview_options = options;
+        auto renderer_path_preview = buffer_to_path(renderer_path_buffer);
+        auto midi_path_preview = buffer_to_path(midi_path_buffer);
+        std::optional<std::filesystem::path> audio_path_preview;
+        if (audio_path_non_empty) {
+            audio_path_preview = buffer_to_path(audio_path_buffer);
+        }
+
+        auto ffmpeg_path_preview = buffer_to_path(ffmpeg_path_buffer);
+        if (!ffmpeg_path_preview.empty()) {
+            preview_options.ffmpeg_path = ffmpeg_path_preview.string();
+        } else {
+            preview_options.ffmpeg_path.clear();
+        }
+
+        auto output_dir_preview = buffer_to_path(output_dir_buffer);
+        if (!output_dir_preview.empty()) {
+            preview_options.output_directory = output_dir_preview.string();
+        } else {
+            preview_options.output_directory.clear();
+        }
+
+        std::string command_preview_text;
+        bool command_ready = false;
+        if (!renderer_path_preview.empty() && !midi_path_preview.empty()) {
+            command_preview_text = build_command_line(renderer_path_preview, midi_path_preview, audio_path_preview, preview_options);
+            command_ready = true;
+        } else {
+            command_preview_text = "Select the renderer executable and MIDI file to generate the command.";
+        }
+
+        if (command_preview_text.size() >= command_buffer.size()) {
+            command_preview_text.resize(command_buffer.size() - 1);
+        }
+        std::memset(command_buffer.data(), 0, command_buffer.size());
+        std::memcpy(command_buffer.data(), command_preview_text.c_str(), command_preview_text.size());
+
         if (!validation_message.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0F, 0.4F, 0.2F, 1.0F));
             ImGui::TextWrapped("%s", validation_message.c_str());
             ImGui::PopStyleColor();
+        }
+
+        ImGui::Separator();
+        ImGui::TextUnformatted("Launch command");
+        ImGui::InputText("##command_preview", command_buffer.data(), command_buffer.size(),
+                         ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_AutoSelectAll);
+        if (command_ready) {
+            ImGui::SameLine();
+            if (ImGui::Button("Copy")) {
+                ImGui::SetClipboardText(command_buffer.data());
+            }
         }
 
         JobStatus status = runner.status();

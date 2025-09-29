@@ -32,6 +32,9 @@
 #include <limits>
 #include <cstdlib>
 #include <cstddef>
+#include <atomic>
+#include <csignal>
+#include <exception>
 
 #if defined(_MSC_VER)
 #pragma execution_character_set("utf-8")
@@ -41,6 +44,7 @@
 #ifdef _WIN32
 #include "directx12_renderer.h"
 #endif
+#include "vulkan_renderer.h"
 #include "piano_keyboard.h"
 #include "midi_video_output.h"
 
@@ -60,7 +64,8 @@ constexpr const char* WINDOW_TITLE = "OpenGL Piano Keyboard";
 
 enum class RendererType {
     OpenGL,
-    DirectX12
+    DirectX12,
+    Vulkan
 };
 
 static void SetFallbackWindowIcon(GLFWwindow* window) {
@@ -146,6 +151,30 @@ DirectX12Renderer* g_directx_renderer = nullptr;
 #endif
 std::unique_ptr<PianoKeyboard> g_piano_keyboard;
 std::unique_ptr<MidiVideoOutput> g_midi_video_output;
+std::atomic<bool> g_should_exit{false};
+
+#ifdef _WIN32
+BOOL WINAPI ConsoleCtrlHandler(DWORD ctrl_type) {
+    switch (ctrl_type) {
+        case CTRL_C_EVENT:
+        case CTRL_BREAK_EVENT:
+        case CTRL_CLOSE_EVENT:
+        case CTRL_LOGOFF_EVENT:
+        case CTRL_SHUTDOWN_EVENT:
+            g_should_exit.store(true);
+            return TRUE;
+        default:
+            break;
+    }
+    return FALSE;
+}
+#else
+void SignalHandler(int signal) {
+    if (signal == SIGINT || signal == SIGTERM) {
+        g_should_exit.store(true);
+    }
+}
+#endif
 
 // GLFW callback functions
 void error_callback(int error, const char* description);
@@ -242,7 +271,7 @@ struct CommandLineOptions {
     VideoOutputSettings::ColorMode color_mode = VideoOutputSettings::ColorMode::Channel;
     std::string ffmpeg_path;  // Custom FFmpeg executable path
     std::string output_directory;  // Custom output directory
-    std::string renderer = "opengl"; // Rendering backend: opengl or dx12 (Windows only)
+    std::string renderer = "opengl"; // Rendering backend: opengl, vulkan, or dx12 (Windows only)
 };
 
 // Parse command line arguments
@@ -264,7 +293,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
         std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
         std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
         std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
-        std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default) or dx12 (Windows)" << std::endl;
+        std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default), dx12 (Windows), vulkan" << std::endl;
         std::cerr << std::endl;
         std::cerr << "Supported codecs:" << std::endl;
         std::cerr << "  Software encoders:" << std::endl;
@@ -432,7 +461,7 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
                 std::cerr << "  --color-mode, -cm <mode>    Blip color mode: channel, track, both" << std::endl;
                 std::cerr << "  --ffmpeg-path, -fp <path>   Path to FFmpeg executable (default: system PATH)" << std::endl;
                 std::cerr << "  --output-directory, -o <path> Output directory for video files (default: executable dir)" << std::endl;
-                std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default) or dx12 (Windows)" << std::endl;
+                std::cerr << "  --renderer, -rdr <backend>  Rendering backend: opengl (default), dx12 (Windows), vulkan" << std::endl;
                 std::cerr << "  --help, -h                  Show this help message" << std::endl;
                 exit(0);
             } else {
@@ -463,9 +492,16 @@ CommandLineOptions ParseCommandLineArguments(int argc, char* argv[]) {
     return options;
 }
 
-int main(int argc, char* argv[]) {
+static int RunApplication(int argc, char* argv[]) {
     // Parse command line arguments
     CommandLineOptions options = ParseCommandLineArguments(argc, argv);
+
+#ifdef _WIN32
+    SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
+#else
+    std::signal(SIGINT, SignalHandler);
+    std::signal(SIGTERM, SignalHandler);
+#endif
 
     std::string renderer_lower;
     renderer_lower.reserve(options.renderer.size());
@@ -481,6 +517,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "Error: DirectX 12 renderer is only available on Windows." << std::endl;
         return -1;
 #endif
+    } else if (renderer_lower == "vulkan" || renderer_lower == "vk") {
+        renderer_type = RendererType::Vulkan;
     } else if (!renderer_lower.empty() && renderer_lower != "opengl") {
         std::cerr << "Warning: Unknown renderer '" << options.renderer << "'. Falling back to OpenGL." << std::endl;
     }
@@ -602,7 +640,7 @@ int main(int argc, char* argv[]) {
         opengl_renderer->Initialize(video_width, video_height);
         g_renderer = std::move(opengl_renderer);
         std::cout << "OpenGL renderer initialized successfully!" << std::endl;
-    } else {
+    } else if (renderer_type == RendererType::DirectX12) {
 #ifdef _WIN32
         glfwDefaultWindowHints();
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -633,6 +671,32 @@ int main(int argc, char* argv[]) {
 #else
         (void)window;
 #endif
+    } else {
+        glfwDefaultWindowHints();
+        glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        glfwWindowHint(GLFW_FOCUSED, GLFW_FALSE);
+        glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+
+        window = glfwCreateWindow(video_width, video_height, "Piano Keyboard Video Renderer (Vulkan)", nullptr, nullptr);
+        if (!window) {
+            std::cerr << "Failed to create headless window for Vulkan renderer" << std::endl;
+            glfwTerminate();
+            return -1;
+        }
+
+        SetWindowIcon(window);
+
+        if (options.show_preview) {
+            std::cout << "Preview window is currently unavailable for the Vulkan backend. Rendering will continue headless." << std::endl;
+        }
+
+        std::cout << "Initializing Vulkan renderer..." << std::endl;
+        auto vk_renderer = std::make_unique<VulkanRenderer>();
+        vk_renderer->Initialize(video_width, video_height);
+        g_renderer = std::move(vk_renderer);
+        std::cout << "Vulkan renderer initialized successfully!" << std::endl;
     }
 
     // Initialize piano keyboard
@@ -659,7 +723,18 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    const char* renderer_label = (renderer_type == RendererType::OpenGL) ? "OpenGL" : "DirectX 12";
+    const char* renderer_label = "OpenGL";
+    switch (renderer_type) {
+        case RendererType::OpenGL:
+            renderer_label = "OpenGL";
+            break;
+        case RendererType::DirectX12:
+            renderer_label = "DirectX 12";
+            break;
+        case RendererType::Vulkan:
+            renderer_label = "Vulkan";
+            break;
+    }
     std::cout << "MIDI file loaded successfully!" << std::endl;
     std::cout << renderer_label << " Piano Keyboard with MIDI Video Output initialized successfully!" << std::endl;
     std::cout << "Starting automatic video rendering..." << std::endl;
@@ -713,6 +788,14 @@ int main(int argc, char* argv[]) {
     std::cout << "Maximum expected frames: " << max_frames << std::endl;
     
     while (!glfwWindowShouldClose(window) && frame_counter < max_frames) {
+        if (g_should_exit.load()) {
+            std::cout << "Shutdown signal received. Stopping rendering..." << std::endl;
+            if (g_midi_video_output && g_midi_video_output->IsRecording()) {
+                g_midi_video_output->StopVideoOutput();
+            }
+            break;
+        }
+
         frame_counter++;
         
         // 定期的な進捗表示
@@ -829,6 +912,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (g_should_exit.load() && g_midi_video_output && g_midi_video_output->IsRecording()) {
+        g_midi_video_output->StopVideoOutput();
+    }
+
     // Cleanup
     g_midi_video_output.reset();
     g_piano_keyboard.reset();
@@ -848,4 +935,15 @@ int main(int argc, char* argv[]) {
 
 void error_callback(int error, const char* description) {
     std::cerr << "GLFW Error " << error << ": " << description << std::endl;
+}
+
+int main(int argc, char* argv[]) {
+    try {
+        return RunApplication(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "Fatal error: unknown exception" << std::endl;
+    }
+    return -1;
 }
