@@ -6,16 +6,6 @@ xmake build "MPP Video Renderer"
 xmake run "MPP Video Renderer" path/to/song.mid
 ```
 
-## Linux prerequisites
-
-Install the native development packages for GLFW, Vulkan, and ShaderC from your distribution before invoking xmake. For example on Debian/Ubuntu:
-
-```bash
-sudo apt install libglfw3-dev libvulkan1 vulkan-headers shaderc
-```
-
-If your distribution splits loader and headers differently, install the equivalents that provide `libglfw.so`, `libvulkan.so`, and `vulkan/shaderc` headers.
-
 ## Command-line help
 Run the executable with `--help` (or `-h`) to see the full reference:
 
@@ -43,13 +33,6 @@ Software codecs such as `libx264`, `libx265`, `libvpx-vp9` and hardware encoders
 - **OpenGL** – GPU-accelerated path with optional on-screen preview (Windows & Linux)
 - **Vulkan** – cross-platform GPU backend that renders headlessly for deterministic offline captures (preview window not yet supported)
 - **DirectX 12** – Windows-only GPU backend (preview window not yet supported)
-
-### Vulkan backend essentials
-- Requires Vulkan 1.2+ headers and loader. When building with xmake on Windows the `vulkan-headers` and `vulkan-loader` packages are fetched automatically. On Linux, xmake uses the system Vulkan loader instead—install a distro package such as `libvulkan1`/`vulkan-loader` plus `vulkan-headers` (often `vulkan-headers` or `vulkan-sdk`) so that `libvulkan.so` and the headers are available on the default include/lib paths.
-- Runtime shader compilation relies on `shaderc`. xmake downloads the dependency on demand; if you compile manually, link against `shaderc_combined` (or the equivalent static/shared library).
-- The renderer uploads draw calls to the GPU: rectangles, rounded gradients, borders, radial blends, and bitmap text now execute through a Vulkan graphics pipeline with instanced quads. Readback copies the final color image via `vkCmdCopyImageToBuffer` so offline captures benefit from device-side acceleration while keeping pixel parity with the other backends.
-- Readback data is vertically flipped in place before piping frames to FFmpeg so Vulkan output matches the upright orientation produced by OpenGL and DirectX backends.
-
 
 ## Launcher
 An ImGui-based launcher is included as an additional target: `MPP Video Renderer Launcher`.
