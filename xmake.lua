@@ -6,7 +6,10 @@ set_languages("cxx17")
 
 -- Set target platform and toolchain
 set_arch("x64")
-add_requires("vulkan-headers", "vulkan-loader")
+add_requires("vulkan-headers")
+if is_plat("windows") then
+    add_requires("vulkan-loader")
+end
 
 if is_plat("windows") then
     set_toolchains("msvc")
