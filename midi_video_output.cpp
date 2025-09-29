@@ -1442,6 +1442,7 @@ void MidiVideoOutput::RenderDebugOverlay() {
     // デバッグ情報の文字列を構築
     std::ostringstream debug_text;
     debug_text << "RealTime: " << real_time_str << "\n";
+    debug_text << "Renderer: " << renderer_->GetName() << "\n";
     
     if (elapsed_days > 0) {
         debug_text << "Elapsed: " << elapsed_days << "d/" << elapsed_hours << ":" 
